@@ -1,0 +1,1260 @@
+---
+title: "Abundance Analysis - Top Taxa"
+output: html_notebook
+---
+# Setup
+```{r}
+.cran_packages <- c("tidyverse","gridExtra", "devtools", 
+                    "adaptiveGPCA", "ade4", "vegan", 
+                    "devtools", "ggthemes", "naniar", 
+                    "scales", "extrafont", "data.table",
+                    "ggpubr", "cowplot")
+.bioc_packages <- c("phyloseq", "BiocStyle","Biobase")
+
+# Install CRAN packages (if not already installed)
+.inst <- .cran_packages %in% installed.packages()
+if (any(!.inst)){
+  install.packages(.cran_packages[!.inst],repos = "http://cran.rstudio.com/")
+}
+
+.inst <- .bioc_packages %in% installed.packages()
+if (any(!.inst)){
+   BiocManager::install(.bioc_packages[!.inst], quietly = FALSE)
+}
+
+# Load packages into session, and print package version
+sapply(c(.cran_packages, .bioc_packages), require, character.only = TRUE)
+sapply(c(.cran_packages, .bioc_packages), package.version)
+```
+# Load the data:
+```{r}
+# Rarified filtered data used in ordination and picrust
+data <- readRDS("../data/PHYLOSEQ_DATA/phyloseq_filtered_rare.rds")
+data
+```
+Move first column of sample data to be SAMPLE_NAME
+```{r}
+samdf <- sample_data(data) %>%
+  select(SAMPLE_NAME, everything())
+sample_data(data) <- samdf
+```
+
+# Description of the data
+
+## Phyla level composition of samples
+```{r}
+CRS <- subset_samples(data, SAMPLE_TYPE == "FESS" & SAMPLE_NUMBER == "1") %>% filter_taxa(.,function(x) sum(x) > 0, TRUE)
+CRS
+```
+Make Supplemental Table 1
+```{r}
+suppTab1 <- data.frame(sample_data(CRS)) %>%
+  select(subject_id, 
+         Age = DEM_AGE,
+         Sex = DEM_SEX,
+         'CFTR Mutation 1' = MUT1,
+         'CFTR Mutation 2' = MUT2,
+         'Homozygous dF508' = HOMO_dF508,
+         SNOT20 = SNOT20_TOTAL,
+         Polyps = SINUS_FACTORS_POLYPS,
+         GERD = SINUS_FACTORS_GERD,
+         Asthma = SINUS_FACTORS_ASTHMA,
+         Allergies = SINUS_FACTORS_ALLERGIES,
+         'Prior FESS' = SINUS_FACTORS_PRIORFESS,
+         'Number of Prior FESS' = SINUS_FACTORS_NUMFESS,
+         'FEV1/FVC (%)' = PFT_FEV1_FVC_PERCENT_MEASURED
+         )
+write_csv(suppTab1, path = "../data/suppTab1.csv")
+```
+
+
+What is the relative abundance of each phylum?
+```{r}
+CRS.phy <- tax_glom(CRS, taxrank = "Phylum")
+tax.count.CRS <-
+  data.frame(taxa_sums(CRS.phy), tax_table(CRS.phy)[, 2])
+rownames(tax.count.CRS) = NULL
+colnames(tax.count.CRS)[1] <- c("Abundance")
+tax.count.CRS$Percent <-
+  round(tax.count.CRS$Abundance / sum(tax.count.CRS$Abundance) * 100, 4)
+library(plyr)
+Phylum_df <-
+  tax.count.CRS[with(tax.count.CRS, order(-Percent)),]
+
+#how much do the top 5 phyla contribute to total abundance?
+top5PhyCRS <- Phylum_df[1:5,]
+round(sum(top5PhyCRS$Percent), 2)
+```
+
+```{r}
+top5PhyCRS
+```
+
+## Description of data: genus-level summary of CRS samples
+```{r}
+#What is the number of Genera found?
+length(get_taxa_unique(CRS, taxonomic.rank="Genus"))
+```
+```{r}
+#what are the abundance levels of each genus?
+CRS.genus <- tax_glom(CRS, taxrank = "Genus")
+tax.count.CRS <-
+  data.frame(tax_table(CRS.genus)[, 2:6], taxa_sums(CRS.genus))
+rownames(tax.count.CRS) = NULL
+colnames(tax.count.CRS) <-
+  c("Phylum", "Class", "Order", "Family", "Genus", "Abundance")
+tax.count.CRS$Percent <-
+  round(tax.count.CRS$Abundance / sum(tax.count.CRS$Abundance) * 100, 4)
+Genus_df_CRS <-
+  tax.count.CRS[with(tax.count.CRS, order(-Percent)),]
+
+#how much do the top 10 genera contribute to total abundance?
+top10GeneraCRS <- Genus_df_CRS[1:10,]
+round(sum(top10GeneraCRS$Percent), 3)
+```
+96.77% of the seqeunces can be attributed to the top 10 genera in the CRS samples. What are they?
+```{r}
+###How diverse are the top 10 genera? i.e., how many species are there per genus?
+top10GeneraCRS <- as.vector(Genus_df_CRS$Genus[1:10])
+Diversity.list.CRS <- vector("list", 10)
+names(Diversity.list.CRS) <- top10GeneraCRS
+
+for (i in 1:length(top10GeneraCRS)) {
+  physub = subset_taxa(CRS, Genus == top10GeneraCRS[i])
+  physub = prune_taxa(taxa_sums(physub) > 0, physub)
+  Diversity.list.CRS[[i]] <- physub
+}
+
+#compute the number of taxa in each element of the list
+NtaxaCRS <- data.frame(unlist(lapply(Diversity.list.CRS, ntaxa)))
+
+colnames(NtaxaCRS) <- "N.Species"
+#Make a table with percent abundance and number of taxa
+genus.tab.CRS <- data.frame(Genus_df_CRS[1:10, ], NtaxaCRS)
+genus.tab.CRS
+```
+# Stacked bargraphs
+## Phylum Level
+```{r}
+dataPhylumPropMelt <- data %>%
+  tax_glom("Phylum") %>%
+  transform_sample_counts(function(x) x/sum(x) * 100) %>%
+  psmelt()
+# Make anything with an abundance less than 1% "Other"
+dataPhylumPropMelt$Phylum <- as.character(dataPhylumPropMelt$Phylum)
+dataPhylumPropMelt <- mutate(dataPhylumPropMelt, PhylumOther = ifelse(Abundance < 1, "Other < 1%", Phylum))
+
+bugcolors <- read_csv("../docs/CRS_Taxa_Colors.csv")
+dataPhylumPropMelt <- left_join(dataPhylumPropMelt, bugcolors, by = c("PhylumOther" = "Taxon")) %>%
+  select(SAMPLE_NAME, subject_id, SAMPLE_NUMBER, SAMPLE_TYPE, SINUS_FACTORS_NUMFESS, SINUS_FACTORS_PRIORFESS, contains("ABX"), Phylum, PhylumOther, Abundance, Color)
+#Separate CRS and non CRS datasets, arrange, and get sample names for plotting
+dataPhylumPropMeltCRS <- dataPhylumPropMelt %>%
+  filter(SAMPLE_TYPE == "FESS",
+         SAMPLE_NUMBER == "1") %>%
+  dplyr::arrange(PhylumOther, desc(Abundance)) 
+
+orderXCRS <- unique(dataPhylumPropMeltCRS$SAMPLE_NAME) 
+labelsXCRS <- unique(dataPhylumPropMeltCRS$subject_id)
+```
+
+```{r}
+colorTax <- unique(dataPhylumPropMeltCRS$PhylumOther)
+colorHex <- unique(dataPhylumPropMeltCRS$Color)
+
+barplot.prop <- ggplot(data=dataPhylumPropMeltCRS, aes(x = SAMPLE_NAME, y = Abundance, fill = PhylumOther)) +
+  #facet_grid(~DIAG_CRS, scales = "free", space = "free") +
+  geom_bar(aes(), stat="identity", position="stack") + 
+  scale_x_discrete(limits = orderXCRS,
+                   labels = labelsXCRS) +
+  theme_minimal(base_size = 14) + 
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(color = "black"),
+        plot.margin = margin(0,0,0,0, "cm"),
+        panel.grid = element_blank()) +
+  scale_fill_manual(breaks = colorTax, values = colorHex) #+ 
+  #ggtitle("CRS Samples")
+barplot.prop
+```
+Melted taxname level
+## taxname Level
+```{r}
+dataTaxNamePropMelt <- CRS %>%
+  tax_glom("TaxName") %>%
+  transform_sample_counts(function(x) x/sum(x) * 100) %>%
+  psmelt()
+# Make anything with an abundance less than 1% "Other"
+dataTaxNamePropMelt$TaxName <- as.character(dataTaxNamePropMelt$TaxName)
+dataTaxNamePropMelt <- dataTaxNamePropMelt %>% 
+  mutate(dataTaxNamePropMelt, TaxNameOther = ifelse(Abundance < 1, "Other < 1%", TaxName)) %>%
+  select(SAMPLE_NAME, subject_id, SAMPLE_NUMBER, SAMPLE_TYPE, Phylum, Genus, TaxName, TaxNameOther, Abundance)
+```
+
+
+
+
+# Taxa Heatmaps
+## Convert phyloseq to ampvis2 object
+```{r}
+library(ampvis2)
+#Combine OTU abundance table and taxonomy table from the phyloseq object "my_phyloseq_object":
+obj <- data
+# Make short names for OTUs - facilitates later plotting ease when amp_heatmap has the option tax_empty = "best" (for some reason)
+taxa_names(obj) <- paste0("ASV", seq(ntaxa(obj)))
+# Fix OTU table layout for exporting. taxa_as_rows = FALSE was not working.
+Totu_table =t(otu_table(obj))
+otu_table(obj)=Totu_table
+#export OTU table from phyloseq object
+otutable <- data.frame(OTU = rownames(phyloseq::otu_table(obj)@.Data),
+                       phyloseq::otu_table(obj)@.Data,
+                       phyloseq::tax_table(obj)@.Data,
+                       check.names = FALSE
+                       )
+otutable <- otutable %>% select(-OTU, 
+                                -TaxName, # Remove special taxa formatting
+                                -Genus_Species2, # Remove special taxa formatting
+                                )
+
+#Extract metadata from the phyloseq object:
+metadata <- data.frame(phyloseq::sample_data(obj), 
+                       check.names = FALSE
+                       )
+metadata <- rownames_to_column(metadata, var = "SAMPLE_ID")
+
+# Extract phylogenetic tree from phyloseq object:
+phytree <- phyloseq::phy_tree(obj)
+
+#Load the data with amp_load:
+ampvis.obj <- amp_load(otutable, metadata,
+                       tree = phytree
+                        )
+ampvis.obj
+
+# Split inot two datasets for CRS and Non-CRS samples
+ampvis.CRS <- amp_subset_samples(ampvis.obj, SAMPLE_TYPE == "FESS", SAMPLE_NUMBER == "1")
+ampvis.CRS
+```
+
+## Heatmaps
+```{r}
+heatmap.CRS <- amp_heatmap(ampvis.CRS,
+                           tax_aggregate = "Genus",
+                           #tax_add = "Genus",
+                           #tax_empty = "Family",
+                           tax_show = 20,
+                           plot_values = FALSE,
+                           plot_colorscale = "log10",
+                           normalise = TRUE,
+                           order_x_by = "cluster",
+                           color_vector = c("whitesmoke", "red")
+                           ) + 
+  coord_fixed(ratio=1) +  #Make the boxes square
+  theme_minimal(base_size = 14) +
+  theme(#axis.text.x = element_blank(),
+        axis.text.x = element_text(angle = 90),
+        axis.text.y = element_text(face = "italic", color = "black"),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        legend.position = "right",
+        legend.title = element_blank(),
+        #plot.margin = unit(c(0,0,0,0), "cm")
+  )
+heatmap.CRS
+```
+
+```{r}
+ggsave(heatmap.CRS, 
+       filename = "../figures/taxaHeatPlotCRS.pdf",
+       device = "pdf",
+       height = 5,
+       width = 8)
+```
+
+```{r}
+heatmap.CRS.df <- amp_heatmap(ampvis.CRS,
+                           textmap = TRUE,
+                           tax_show = 20,
+                           tax_aggregate = "Genus",
+                           plot_values = FALSE,
+                           normalise = TRUE,
+                           order_x_by = "cluster",
+                           )
+heatmap.CRS.df <- heatmap.CRS.df %>% rownames_to_column("Genus")
+heatSampleOrder <- unique(colnames(heatmap.CRS.df))
+```
+Make barplot from averages of these numbers
+```{r}
+heatmap.CRS.df.meanRA <- heatmap.CRS.df %>%
+  pivot_longer(-Genus, names_to = "Sample", values_to = "RA") %>%
+  group_by(Genus) %>%
+  dplyr::summarise(meanRA = mean(RA)) %>%
+  dplyr::arrange(desc(meanRA))
+# Make a barplot
+meanRAbarCRS <- ggplot(heatmap.CRS.df.meanRA, aes(x = reorder(Genus,meanRA), y = meanRA)) +
+  geom_col(fill = "lightgrey", color = "white", width = 1) +
+  coord_flip() +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(color = "black"),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank())
+meanRAbarCRS
+```
+# Table of top 20 Genera - TaxNames
+Use the names of this heatmap to isolate the TaxNames from the unsummerized dataset
+```{r}
+top20Genera <- unique(heatmap.CRS.df$Genus)
+#dataTaxNamePropMeltTop20Genera <- dataTaxNamePropMelt %>%
+#  filter(Genus %in% top20Genera) %>%
+#  group_by(Genus, TaxName) %>%
+#  dplyr::summarize(meanRA = mean(Abundance))
+```
+
+```{r}
+CRS.taxname.prop.melt <- CRS  %>%
+  tax_glom("TaxName") %>%
+  transform_sample_counts(function(x) x/sum(x) * 100) %>%
+  psmelt() %>%
+  filter(!Abundance == 0) %>%
+  group_by(TaxName) %>%
+  dplyr::summarize(avgRelAbun = mean(Abundance)) %>%
+  ungroup() %>%
+  select(TaxName, avgRelAbun)
+```
+```{r}
+CRS.taxname <- tax_glom(CRS, "TaxName")
+```
+
+Compute prevalence of taxa in samples
+```{r}
+# Compute prevalence of each feature, store as data.frame
+prevdf.taxname.CRS = apply(X = otu_table(CRS.taxname),
+               MARGIN = ifelse(taxa_are_rows(CRS.taxname), yes = 1, no = 2),
+               FUN = function(x){sum(x > 0)})
+# Add taxonomy and total read counts to this data.frame
+prevdf.taxname.CRS = data.frame(Prevalence = prevdf.taxname.CRS,
+                    Abundance = taxa_sums(CRS.taxname),
+                    phyloseq::tax_table(CRS.taxname)@.Data) %>%
+  mutate(PercentAbundance = round(Abundance/sum(Abundance) * 100, 4)) %>%
+  rownames_to_column("ASV") %>%
+  left_join(CRS.taxname.prop.melt, by = "TaxName") %>%
+  column_to_rownames("ASV") %>%
+  select(Prevalence, Abundance, PercentAbundance, avgRelAbun, TaxName, everything()) %>%
+  mutate(DIAG_CRS = "CRS")
+dim(prevdf.taxname.CRS)
+```
+Filter to include just top 20
+```{r}
+prevdf.taxname.CRS.top20 <- filter(prevdf.taxname.CRS, Genus %in% top20Genera)
+```
+Export as a .CSV
+```{r}
+write_csv(prevdf.taxname.CRS.top20, "../data/top20GeneraPrevAbun.csv")
+```
+
+
+
+
+
+
+### Sinus Factors
+```{r}
+sinusFactorsCRS <- as.data.frame(sample_data(CRS)) %>%
+  select(SAMPLE_NAME, subject_id, contains("SINUS_FACTORS")) %>%
+  select(-contains("OTHER")) %>%
+  filter(!is.na(SINUS_FACTORS_COMPLETE)) %>%
+  select(-SINUS_FACTORS_COMPLETE, -SINUS_FACTORS_POLYPOIDCHANGE, -SINUS_FACTORS_NUMFESS, -SINUS_FACTORS_SUBSEQFESS) %>%
+  mutate(Smoker = ifelse(SINUS_FACTORS_SMOKER == "Checked",1,0),
+         Polyps = ifelse(SINUS_FACTORS_POLYPS == "Checked",1,0),
+         GERD = ifelse(SINUS_FACTORS_GERD == "Checked",1,0),
+         Allergies = ifelse(SINUS_FACTORS_ALLERGIES == "Checked",1,0),
+         "Prior FESS" = ifelse(SINUS_FACTORS_PRIORFESS == "Checked",1,0),
+         Asthma = ifelse(SINUS_FACTORS_ASTHMA == "Checked",1,0)) %>%
+  # no one is a smoker in this group
+  select(SAMPLE_NAME, subject_id, Polyps, GERD, Allergies, "Prior FESS", Asthma) %>%
+  pivot_longer(cols = c("Polyps", "GERD", "Asthma", "Allergies", "Prior FESS"),
+               names_to = "FACTOR", values_to = "boo") %>%
+  mutate(BOOL = ifelse(boo == 1, TRUE,FALSE))
+sinusFactorsCRS
+```
+```{r}
+sinusFactorBar <- ggplot(sinusFactorsCRS, aes(x = SAMPLE_NAME, y = FACTOR)) +
+  geom_tile(colour = "whitesmoke",size=.5, aes(fill = BOOL)) +
+#  geom_point(aes(color = BOOL)) + # Make the squares dots instead
+  scale_x_discrete(breaks = heatSampleOrder, 
+                   limits = heatSampleOrder,
+                   expand = c(0,0)) + #Make the boxes square
+  scale_y_discrete(expand = c(0,0)) + #Make the boxes square
+  coord_fixed(ratio=1) +  #Make the boxes square
+  scale_fill_manual(values = c("white", "black")) + # Use with filled boxes instead
+#  scale_fill_manual(values = c("white", "white")) + # Make the squares dots instead
+#  scale_color_manual(values = c("white", "black")) + # Make the squares dots instead
+  theme_minimal(base_size = 14) + 
+  theme(legend.position = "",
+        axis.text.x = element_blank(),
+        #axis.text.x = element_text(angle=90),
+        axis.ticks = element_blank(),
+        axis.title = element_blank())
+sinusFactorBar
+```
+### Culture Data
+```{r}
+samdf_cultures <- data.frame(sample_data(CRS)) %>% 
+  select(SAMPLE_NAME, subject_id, contains("LABS")) %>%
+  mutate('A. xylosoxidans' = ifelse(grepl("Achromobacter", LABS_OTHER_1, ignore.case = TRUE), 1, 0),
+         'B. cepacia cmplx' = ifelse(grepl("Burkholderia", LABS_OTHER_1, ignore.case = TRUE), 1, 0),
+         'H. influenzae' = ifelse(grepl("Haemophilus", LABS_OTHER_1, ignore.case = TRUE), 1, 0),
+         'Klebsiella sp.' = ifelse(grepl("Klebsiella", LABS_OTHER_1, ignore.case = TRUE), 1, 0))
+
+sinusCulturesCRS <- samdf_cultures %>%
+  select(SAMPLE_NAME, subject_id, contains("SINUS_FACTORS"), LABS_COAG_NEG_STAPH, LABS_S_AUREUS, LABS_P_AERUGINOSA, LABS_P_AERUGINOSA_MUCOID, LABS_STREP_PNEUMO, 'A. xylosoxidans', 'B. cepacia cmplx', 'H. influenzae','Klebsiella sp.', LABS_SAMPLE_PURULENCE) %>%
+  mutate('S. aureus' = ifelse(LABS_S_AUREUS == "Positive",1,0),
+         'Coag.Neg.Staph' = ifelse(LABS_COAG_NEG_STAPH == "Positive",1,0),
+         'S. pneumoniae' = ifelse(LABS_STREP_PNEUMO == "Positive",1,0),
+         'P. aeruginosa' = ifelse(LABS_P_AERUGINOSA == "Positive",1,0),
+         'P. aeruginosa (mucoid)' = ifelse(LABS_P_AERUGINOSA_MUCOID == "Positive",1,0),
+         'Sample Purulence' = ifelse(LABS_SAMPLE_PURULENCE == "Yes", 1,0)) %>%
+  # Dropping s. pneumo because it is negative across all samples
+  select(SAMPLE_NAME, subject_id, 'S. aureus','Coag.Neg.Staph', 'S. pneumoniae',
+         'P. aeruginosa','P. aeruginosa (mucoid)','A. xylosoxidans',
+         'B. cepacia cmplx', 'H. influenzae', 'Klebsiella sp.', 'Sample Purulence') %>%
+  pivot_longer(cols = c('S. aureus','Coag.Neg.Staph' , 'S. pneumoniae',
+                        'P. aeruginosa','P. aeruginosa (mucoid)','A. xylosoxidans',
+                        'B. cepacia cmplx', 'H. influenzae', 'Klebsiella sp.', 'Sample Purulence'), 
+               names_to = "FACTOR", values_to = "boo") %>%
+  mutate(boo = ifelse(is.na(boo),0,boo)) %>%
+  mutate(BOOL = ifelse(boo == 1, TRUE,FALSE))
+sinusCulturesCRS
+```
+
+```{r}
+cultureOrder <- c("Klebsiella sp.","B. cepacia cmplx","A. xylosoxidans","H. influenzae","S. pneumoniae",
+                  "Coag.Neg.Staph","S. aureus", "P. aeruginosa (mucoid)", "P. aeruginosa", "Sample Purulence")
+
+sinusCultureBar <- ggplot(sinusCulturesCRS, aes(x = SAMPLE_NAME, y = FACTOR)) +
+  geom_tile(colour = "whitesmoke",size=.5, aes(fill = BOOL)) +
+  geom_point(aes(color = BOOL), size = 4) + # Make the squares dots instead
+  scale_x_discrete(breaks = heatSampleOrder, 
+                   limits = heatSampleOrder,
+                   expand = c(0,0)) + #Make the boxes square
+  scale_y_discrete(expand = c(0,0),
+                   limits = cultureOrder,
+                   breaks = cultureOrder) + #Make the boxes square
+  coord_fixed(ratio=1) +  #Make the boxes square
+#  scale_fill_manual(values = c("white", "black")) + # Use with filled boxes instead
+  scale_fill_manual(values = c("white", "white")) + # Make the squares dots instead
+  scale_color_manual(values = c("white", "black")) + # Make the squares dots instead
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "",
+        axis.text.y = element_text(face = "italic"),
+       # axis.text.x = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x = element_text(angle=90),
+        axis.ticks = element_blank(),
+        axis.title = element_blank())
+sinusCultureBar
+```
+```{r}
+ggsave(sinusCultureBar, filename = "../figures/culture_heatmap_points.pdf",
+       device = "pdf",
+       height = 2,
+       width = 6)
+```
+
+# Dominant Organism Analysis
+It looks like there is a clear division of whether a sample has a Firmicutes (Staph/Strep) or Proteobacteria (Pseudo/Achromo/Burkholderia) dominance. Let's make a metric for dominance. An Genus level taxon is considered dominant if it is greater than twice as abundant (proportions) as the next most abundant Genus.  
+## Define Dominance
+Make a dataframe to determine the dominant genus in each sample, if it exists.
+```{r}
+dominanceDF <- CRS  %>%
+  tax_glom("Genus") %>%
+  transform_sample_counts(function(x) x/sum(x) * 100) %>%
+  psmelt() %>%
+  select(SAMPLE_NAME, Genus, Abundance, DEM_AGE) %>%
+  filter(Abundance > 0) %>%
+  arrange(SAMPLE_NAME, -Abundance)
+
+dominanceDF1 <- dominanceDF %>%
+  group_by(SAMPLE_NAME) %>%
+  slice(n=1) %>%
+  select(SAMPLE_NAME, DEM_AGE, Genus_rank_1 = Genus, Abundance_rank_1 = Abundance)
+
+dominanceDF2 <- dominanceDF %>%
+  group_by(SAMPLE_NAME) %>%
+  slice(n=2) %>%
+  select(SAMPLE_NAME, DEM_AGE, Genus_rank_2 = Genus, Abundance_rank_2 = Abundance)
+
+dominanceDFjoin <- left_join(dominanceDF1, dominanceDF2) %>%
+  mutate(Genus_Dominant = ifelse(Abundance_rank_1 > 2*Abundance_rank_2, Genus_rank_1, NA))
+dominanceDFjoin
+
+dominanceDFjoinClinicalData <- dominanceDFjoin %>%
+  left_join(data.frame(sample_data(CRS)), by = "SAMPLE_NAME")
+```
+Only one sample did not have a dominant organism present, where Pseudomonas and Staphylococcus were present in nearly equal proportions. 
+Bar Graph of dominant organisms
+
+## Pie chart for dominant organisms
+```{r}
+dominanceDFjoinSumm <- dominanceDFjoin %>%
+  mutate(Genus_Dominant_Grouped = ifelse(Genus_Dominant %in% c("Achromobacter","Haemophilus","Burkholderia-Caballeronia-Paraburkholderia"), "Proteobacteria:Other",
+                                         ifelse(Genus_Dominant %in% c("Streptococcus", "Veillonella"), "Firmicutes:Other", Genus_Dominant))) %>%
+  group_by(Genus_Dominant_Grouped) %>%
+  dplyr::tally()
+dominanceDFjoinSumm
+```
+```{r}
+labs <- paste0(dominanceDFjoinSumm$Genus_Dominant_Grouped, " \n(n=", dominanceDFjoinSumm$n, ")")
+domPie <- ggpie(data = dominanceDFjoinSumm, x = "n", 
+                label = labs,
+                lab.pos = "in",
+                fill = "Genus_Dominant_Grouped",
+                palette = c("#e69f00","#0072b2","#56b4e9","#ffd047","grey")) + theme(legend.position = "")  
+domPie
+```
+export pie chart
+```{r}
+ggsave(domPie, filename = "../figures/Phyloseq/dominance-pie-chart.pdf",
+       device = "pdf",
+       height = 3,
+       width = 3)
+```
+
+Dominant Organism and Sinus Factors
+```{r, fig.height=7, fig.width=20}
+DomPolypsBoxplot <- ggboxplot(dominanceDFjoinClinicalData,
+                             x = "SINUS_FACTORS_POLYPS",
+                             y = "Abundance_rank_1",
+                             add = "jitter",
+                             add.params = list(size = 2, color = "Genus_Dominant")) + 
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "") +
+  stat_compare_means()
+
+DomGERDBoxplot <- ggboxplot(dominanceDFjoinClinicalData,
+                             x = "SINUS_FACTORS_GERD",
+                             y = "Abundance_rank_1",
+                             add = "jitter",
+                             add.params = list(size = 2, color = "Genus_Dominant")) + 
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "") +
+  stat_compare_means()
+
+DomAsthmaBoxplot <- ggboxplot(dominanceDFjoinClinicalData,
+                             x = "SINUS_FACTORS_ASTHMA",
+                             y = "Abundance_rank_1",
+                             add = "jitter",
+                             add.params = list(size = 2, color = "Genus_Dominant")) +
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "") +
+  stat_compare_means()
+
+DomAllergiesBoxplot <- ggboxplot(dominanceDFjoinClinicalData,
+                             x = "SINUS_FACTORS_ALLERGIES",
+                             y = "Abundance_rank_1",
+                             add = "jitter",
+                             add.params = list(size = 2, color = "Genus_Dominant")) + 
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "right") +
+  stat_compare_means()
+
+plot_grid(DomPolypsBoxplot, DomGERDBoxplot, DomAsthmaBoxplot, DomAllergiesBoxplot, nrow = 1, rel_widths = c(1,1,1,2))
+```
+Don't really see any response to abundance of a dominant organism and any of these sinus factors.
+
+
+# Shannon Diversity
+Add some summary variables to the sample data
+
+## Calculate Shannon Diversity per sample
+```{r}
+alphadiv <- estimate_richness(CRS, measures = c("Shannon","Simpson","InvSimpson"))
+alphadiv.dominance.join <- alphadiv %>%
+  rownames_to_column("SAMPLE_NAME") %>%
+  left_join(dominanceDFjoin, by = "SAMPLE_NAME") %>%
+  select(SAMPLE_NAME, Shannon, Simpson, InvSimpson, Genus_Dominant, Abundance_rank_1, DEM_AGE)
+
+alphadiv.dominance.join.staph.pseudo <- filter(alphadiv.dominance.join, Genus_Dominant %in% c("Staphylococcus", "Pseudomonas"))
+alphadiv.dominance.join.staph <- filter(alphadiv.dominance.join, Genus_Dominant == "Staphylococcus")
+alphadiv.dominance.join.pseudo <- filter(alphadiv.dominance.join, Genus_Dominant == "Pseudomonas")
+```
+```{r}
+AlphaDomScatter <- ggscatter(alphadiv.dominance.join.pseudo, x = "DEM_AGE", y = "Abundance_rank_1",
+                             color = "Genus_Dominant",
+                             add = "reg.line", 
+                             conf.int = TRUE, 
+                             palette = "npg",
+          ) +
+  theme_pubr() +
+#  scale_y_log10() +
+#  scale_x_log10() +
+  stat_cor(method = "spearman")  
+AlphaDomScatter
+```
+```{r}
+AlphaDomScatter <- ggscatter(alphadiv.dominance.join.staph, x = "DEM_AGE", y = "Abundance_rank_1",
+                             color = "Genus_Dominant",
+                             add = "reg.line", 
+                             conf.int = TRUE, 
+                             palette = "npg",
+          ) +
+  theme_pubr() +
+#  scale_y_log10() +
+#  scale_x_log10() +
+  stat_cor(method = "spearman")  
+AlphaDomScatter
+```
+### Grouped by sinus factors
+```{r}
+alphadivSampleData <- alphadiv %>%
+  rownames_to_column("SAMPLE_NAME") %>%
+  left_join(data.frame(sample_data(CRS)), by = "SAMPLE_NAME")
+```
+```{r, fig.height=7, fig.width=20}
+AlphaPolypsBoxplot <- ggboxplot(alphadivSampleData,
+                             x = "SINUS_FACTORS_POLYPS",
+                             y = "Shannon",
+                             add = "point",
+                             add.params = list(size = 2),
+                             fill = "SINUS_FACTORS_POLYPS",
+                             palette = "npg") + 
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "") +
+  stat_compare_means()
+
+AlphaGERDBoxplot <- ggboxplot(alphadivSampleData,
+                             x = "SINUS_FACTORS_GERD",
+                             y = "Shannon",
+                             add = "point",
+                             add.params = list(size = 2),
+                             fill = "SINUS_FACTORS_GERD",
+                             palette = "npg") + 
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "") +
+  stat_compare_means()
+
+AlphaAsthmaBoxplot <- ggboxplot(alphadivSampleData,
+                             x = "SINUS_FACTORS_ASTHMA",
+                             y = "Shannon",
+                             add = "point",
+                             add.params = list(size = 2),
+                             fill = "SINUS_FACTORS_ASTHMA",
+                             palette = "npg") + 
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "") +
+  stat_compare_means()
+
+AlphaAllergiesBoxplot <- ggboxplot(alphadivSampleData,
+                             x = "SINUS_FACTORS_ALLERGIES",
+                             y = "Shannon",
+                             add = "point",
+                             add.params = list(size = 2),
+                             fill = "SINUS_FACTORS_ALLERGIES",
+                             palette = "npg") + 
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "") +
+  stat_compare_means()
+
+AlphaHomodF508 <- ggboxplot(alphadivSampleData,
+                             x = "HOMO_dF508",
+                             y = "Shannon",
+                             add = "point",
+                             add.params = list(size = 2),
+                             fill = "HOMO_dF508",
+                             palette = "npg") + 
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "") +
+  stat_compare_means()
+
+plot_grid(AlphaPolypsBoxplot, AlphaGERDBoxplot, AlphaAsthmaBoxplot, AlphaAllergiesBoxplot, AlphaHomodF508, nrow = 1)
+```
+
+
+## Grouped by dominant organism
+
+* To Do: If I calculated as a group (Instead of calc indiv and plotting), would I get the same results?
+
+```{r, fig.height=7, fig.width=7}
+AlphaDomBoxplot <- ggboxplot(alphadiv.dominance.join.staph.pseudo,
+                             x = "Genus_Dominant",
+                             y = "Shannon",
+                             add = "jitter",
+                             add.params = list(size = 2),
+                             fill = "Genus_Dominant",
+                             palette = c("#56b4e9","#ffd047")) + 
+  theme_pubr(base_size = 10) +
+  theme(axis.text.x = element_text(face = "italic"),
+        axis.title.x = element_blank(),
+        legend.position = "") +
+  stat_compare_means()
+AlphaDomBoxplot
+```
+```{r}
+ggsave(AlphaDomBoxplot, filename = "../figures/ShannonDominantBoxplot.pdf",
+       device = "pdf",
+       useDingbats = FALSE,
+       height = 3, width = 3)
+```
+
+## Clinical factors
+### Age
+```{r}
+shannonAgeScatter <- ggscatter(alphadiv.dominance.join, x = "DEM_AGE", y = "Shannon",
+                             add = "reg.line", 
+                             conf.int = TRUE, 
+                             palette = "npg",
+          ) +
+  theme_pubr() +
+#  scale_y_log10() +
+#  scale_x_log10() +
+  stat_cor(method = "spearman")  
+shannonAgeScatter
+```
+```{r}
+dominant.colors <- c("#de2d26", #Achromo
+                   "#009E73", #Burkholderia
+                   "#66209d", #Haemophilus
+                   "#56b4e9", #Pseudomonas
+                   "#ffd047", #Staphylococcus
+                   "#D55E00", #Strep
+                   "grey", #Veillonella
+                    "black") # NA
+```
+
+
+```{r}
+alphadiv.dominance.join$DEM_AGE_BIN <- cut(alphadiv.dominance.join$DEM_AGE, breaks = c(0, 25, 35, 55))
+```
+```{r}
+alphadiv.dominance.join <- mutate(alphadiv.dominance.join, Genus_Dominant = ifelse(is.na(Genus_Dominant), "None",
+                                                                                   ifelse(grepl("Burkholderia", Genus_Dominant), "Burkholderia", Genus_Dominant)))
+
+dominant.factor.levels <- c("Achromobacter", "Burkholderia","Haemophilus","Pseudomonas",
+                            "Staphylococcus","Streptococcus","Veillonella","None")
+
+alphadiv.dominance.join$Genus_Dominant <- factor(alphadiv.dominance.join$Genus_Dominant, levels = dominant.factor.levels)
+```
+```{r}
+AlphaAgeBoxplot <- ggboxplot(subset(alphadiv.dominance.join, !is.na(Genus_Dominant)),
+                             x = "DEM_AGE_BIN",
+                             y = "Shannon",
+                             add = "point",
+                             add.params = list(size = 2, 
+                                               color = "Genus_Dominant"
+                                               ),
+                             #color = "Genus_Dominant",
+                             palette = dominant.colors) +
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(face = "italic"),
+        axis.title.x = element_blank()) +
+  stat_compare_means()
+AlphaAgeBoxplot
+```
+```{r}
+ggsave(AlphaAgeBoxplot, filename = "../figures/ShannonDominantBoxplotAge.pdf",
+       device = "pdf",
+       useDingbats = FALSE,
+       height = 3, width = 3)
+```
+```{r}
+AlphaAgeBoxplotLegend <- get_legend(AlphaAgeBoxplot + theme(legend.position = "right", legend.key.size = unit(.2, "cm")))
+ggsave(AlphaAgeBoxplotLegend, filename = "../figures/ShannonDominantBoxplotAge_Legend.pdf",
+       device = "pdf",
+       useDingbats = FALSE,
+       height = 1.5,
+       width = 1.5)
+```
+
+
+
+### Antibiotics
+12 out of 22 samples do not have associated antibiotics records that fit the inclusion criteria. The rest of the samples were excluded because the medications entered in the dataset fall outside the 3 month window before surgery to be conisdered in the analysis.
+```{r}
+CRS_ABX <- data.frame(sample_data(CRS)) %>% 
+  select(SAMPLE_NAME, subject_id, contains("MEDS")) %>%
+  pivot_longer(cols = contains("ABX_BIN"), names_to = "ABX", values_to = "BIN") %>%
+  group_by(SAMPLE_NAME, subject_id) %>%
+  dplyr::summarise(TOTAL_ABX = sum(BIN))
+summary(CRS_ABX$TOTAL_ABX)
+```
+
+### SNOT-22 total/parts
+Half the data (11 samples) have missing SNOT-22 data. These are mostly samples from the very beginning of collection.
+```{r}
+CRS_SNOT22 <- data.frame(sample_data(CRS)) %>% 
+  select(SAMPLE_NAME, subject_id, contains("SNOT"), contains("TOP_5"))
+summary(CRS_SNOT22$SNOT20_TOTAL)
+```
+
+### PFTs
+Samples 61 and 87 had PFTs that fell outside of a 6 month window set for inclusion in the dataset
+```{r}
+CRS_PFT <- data.frame(sample_data(CRS)) %>% 
+  select(SAMPLE_NAME, subject_id, SNOT20_TOTAL,
+         PFT_FVC_PREDICTED,
+         PTF_FVC_MEASURED,
+         PFT_FVC_PERCENT,
+         PFT_FEV1_PREDICTED,
+         PFT_FEV1_MEASURED,
+         PFT_FEV1_PERCENT,
+         PFT_FEV1_FVC_PERCENT_PREDICTED,
+         PFT_FEV1_FVC_PERCENT_MEASURED,
+         PFT_EXPIRATORY_TIME_SEC) %>%
+  mutate(PFT_FEVFVC_MEAS_BIN = cut(PFT_FEV1_FVC_PERCENT_MEASURED, breaks = c(0, 80, 100)))
+  # make categorical vars too
+```
+
+```{r}
+# Add to alphadiv.dominance.join
+alphadiv.dominance.join <- left_join(alphadiv.dominance.join, CRS_PFT, by = "SAMPLE_NAME")
+```
+
+```{r}
+shannonFEVScatter <- ggscatter(alphadiv.dominance.join, x = "PFT_FEV1_PERCENT", y = "Shannon",
+                             add = "reg.line", 
+                             conf.int = TRUE, 
+                             palette = "npg",
+          ) +
+  theme_pubr() +
+#  scale_y_log10() +
+#  scale_x_log10() +
+  stat_cor(method = "spearman")  
+```
+```{r}
+shannonFVCscatter <- ggscatter(alphadiv.dominance.join, x = "PFT_FVC_PERCENT", y = "Shannon",
+                             add = "reg.line", 
+                             conf.int = TRUE, 
+                             palette = "npg",
+          ) +
+  theme_pubr() +
+#  scale_y_log10() +
+#  scale_x_log10() +
+  stat_cor(method = "spearman")  
+```
+```{r}
+shannonEXPscatter <- ggscatter(alphadiv.dominance.join, x = "PFT_EXPIRATORY_TIME_SEC", y = "Shannon",
+                             add = "reg.line", 
+                             conf.int = TRUE, 
+                             palette = "npg",
+          ) +
+  theme_pubr() +
+#  scale_y_log10() +
+#  scale_x_log10() +
+  stat_cor(method = "spearman")  
+```
+```{r}
+shannonFEVFVCPREDscatter <- ggscatter(alphadiv.dominance.join, x = "PFT_FEV1_FVC_PERCENT_PREDICTED", y = "Shannon",
+                             add = "reg.line", 
+                             conf.int = TRUE, 
+                             palette = "npg",
+          ) +
+  theme_pubr() +
+#  scale_y_log10() +
+#  scale_x_log10() +
+  stat_cor(method = "spearman")  
+```
+```{r}
+shannonFEVFVCMEASscatter <- ggscatter(alphadiv.dominance.join, x = "PFT_FEV1_FVC_PERCENT_MEASURED", y = "Shannon",
+                             add = "reg.line", 
+                             conf.int = TRUE, 
+                             palette = "npg",
+          ) +
+  theme_pubr() +
+#  scale_y_log10() +
+#  scale_x_log10() +
+  stat_cor(method = "spearman")  
+```
+
+```{r, fig.width=10, fig.height=10}
+shannonPFTScatter <- plot_grid(shannonFEVScatter, shannonFVCscatter, shannonEXPscatter, shannonFEVFVCMEASscatter, nrow = 2)
+shannonPFTScatter
+```
+For PFTs, the measured FEV1/FVC ratio below 80% signifies obstructive/restrictive lung disease. So we can use that cutoff to bin the values to make categorical comparisons
+
+```{r}
+shannonPFTs <- filter(alphadiv.dominance.join, !is.na(PFT_FEVFVC_MEAS_BIN))
+```
+
+PFT Boxplot
+```{r, fig.height=7, fig.width=7}
+AlphaPFTBoxplot <- ggboxplot(shannonPFTs,
+                             x = "PFT_FEVFVC_MEAS_BIN",
+                             y = "Simpson",
+                             add = "jitter",
+                             add.params = list(size = 3),
+                             #color = "Genus_Dominant",
+                             palette = "npg") + 
+  theme(axis.text.x = element_text(face = "italic"),
+        axis.title.x = element_blank()) +
+  theme_pubr(base_size = 10) +
+  stat_compare_means()
+AlphaPFTBoxplot
+```
+dominant org boxplot
+```{r}
+shannonPFTs <- mutate(shannonPFTs, Phylum_Dominant = ifelse(Genus_Dominant %in% c("Staphylococcus","Streptococcus","Veillonella"), "Firmicutes", "Proteobacteria"))
+DomStaphPseudoPFTs <- filter(shannonPFTs, Genus_Dominant %in% c("Staphylococcus","Pseudomonas")) 
+DomPFTBoxplot <- ggboxplot(DomStaphPseudoPFTs,
+                           x = "Genus_Dominant",
+                           y = "PFT_FEV1_FVC_PERCENT_MEASURED",
+                             add = "jitter",
+                             add.params = list(size = 2),
+                           fill = "Genus_Dominant",
+                             palette = c("#56b4e9","#ffd047")) +
+  scale_y_continuous(limits = c(0,100),
+                    breaks = c(0,20,40,60,80,100)) +
+  theme_pubr(base_size = 10) +
+  theme(axis.text.x = element_text(face = "italic"),
+        axis.title.x = element_blank(),
+        legend.position = "") +
+  geom_hline(yintercept = 59, alpha = 1, linetype = 2, color = "black") +
+  ylab("FEV1% (FEV1/FVC)") +
+  stat_compare_means()
+DomPFTBoxplot
+```
+```{r}
+ggsave(DomPFTBoxplot, filename = "../figures/PFTDominantBoxplot.pdf",
+       device = "pdf",
+       useDingbats = FALSE,
+       height = 3, width = 3)
+```
+
+
+### FESS#
+16 out of 22 patients had FESS procedures previous to to their first sample 
+```{r}
+CRS_NUMFESS <- data.frame(sample_data(CRS)) %>% 
+  select(SAMPLE_NAME, subject_id, SINUS_FACTORS_NUMFESS)
+summary(CRS_NUMFESS$SINUS_FACTORS_NUMFESS)
+```
+
+# Pseudo/Staph
+```{r}
+PseudoStaphWide <- CRS  %>%
+  tax_glom("Genus") %>%
+  transform_sample_counts(function(x) x/sum(x)*100) %>%
+  psmelt() %>%
+  filter(Abundance > 0,
+         Genus %in% c("Pseudomonas","Staphylococcus")) %>%
+  select(SAMPLE_NAME, Genus, Abundance) %>%
+  pivot_wider(names_from = Genus, values_from = Abundance)
+```
+Now, make a scatterplot of Actino and Bacteroidetes in each sample
+```{r}
+PseudoStaphScatter <- ggscatter(PseudoStaph, x = "Pseudomonas", y = "Staphylococcus",
+          add = "reg.line",                         # Add regression line
+          conf.int = TRUE,                          # Add confidence interval
+          #color = "DIAG_CRS",
+          palette = "npg",           # Color by groups "cyl"
+          ) +
+#  scale_y_log10() +
+#  scale_x_log10() +
+  stat_cor(method = "spearman")  
+PseudoStaphScatter
+```
+## Correlations with clinical factors
+
+```{r}
+PseudoStaphPFTs <- left_join(PseudoStaph, CRS_PFT, by = "SAMPLE_NAME")
+```
+
+
+```{r}
+PseudoPFTScatter <- ggscatter(PseudoStaphPFTs, x = "Pseudomonas", y = "PFT_FEV1_FVC_PERCENT_PREDICTED",
+          add = "reg.line",                         # Add regression line
+          conf.int = TRUE,                          # Add confidence interval
+          #color = "DIAG_CRS",
+          palette = "npg",           # Color by groups "cyl"
+          ) +
+#  scale_y_log10() +
+#  scale_x_log10() +
+  stat_cor(method = "spearman")  
+PseudoPFTScatter
+```
+
+
+# Clinic Samples with Paired FESS
+
+```{r}
+sample_names(data)
+```
+Samples with matching clinic samples
+```{r}
+Clinic <- data %>%
+  subset_samples(SAMPLE_TYPE == "Clinic")
+sample_names(Clinic)
+
+```
+
+```{r}
+clinicNames <- c("9","128","129","134","159","162","171")
+FESS_Clinic_Matches <- data %>%
+  subset_samples(SAMPLE_TYPE %in% "FESS" &
+                 subject_id %in% clinicNames)
+FESS_Clinic_Matches
+sample_names(FESS_Clinic_Matches)
+```
+```{r}
+FESS_Clinic_9 <- data %>%
+  subset_samples(SAMPLE_TYPE %in% c("FESS","Clinic") &
+                   subject_id == "9") %>% 
+  filter_taxa(.,function(x) sum(x) > 0, TRUE)
+FESS_Clinic_9
+```
+
+```{r}
+FESS_Clinic_171 <- data %>%
+  subset_samples(SAMPLE_TYPE %in% c("FESS","Clinic") &
+                   subject_id == "171")  %>% 
+  filter_taxa(.,function(x) sum(x) > 0, TRUE)
+FESS_Clinic_171
+```
+
+##ASV Level stacked bargraphs
+### TaxName Level
+```{r}
+ClinicTaxNamePropMelt_9 <- FESS_Clinic_9 %>%
+  tax_glom("TaxName") %>%
+  transform_sample_counts(function(x) x/sum(x) * 100) %>%
+  psmelt()
+# Make anything with an abundance less than 1% "Other"
+ClinicTaxNamePropMelt_9$TaxName <- as.character(ClinicTaxNamePropMelt_9$TaxName)
+ClinicTaxNamePropMelt_9 <- mutate(ClinicTaxNamePropMelt_9, TaxNameOther = ifelse(Abundance < 1, "Other < 1%", TaxName))
+
+#bugcolors <- read_csv("../docs/CRS_Taxa_Colors.csv")
+#dataPhylumPropMelt <- left_join(dataPhylumPropMelt, bugcolors, by = c("PhylumOther" = "Taxon")) %>%
+#  select(SAMPLE_NAME, subject_id, SAMPLE_NUMBER, SAMPLE_TYPE, SINUS_FACTORS_NUMFESS, SINUS_FACTORS_PRIORFESS, contains("ABX"), Phylum, PhylumOther, Abundance, Color)
+#Separate CRS and non CRS datasets, arrange, and get sample names for plotting
+ClinicTaxNamePropMelt_9 <- ClinicTaxNamePropMelt_9 %>%
+#  filter(SAMPLE_TYPE == "FESS",
+#        SAMPLE_NUMBER == "1") %>%
+  select(SAMPLE_NAME, subject_id, SAMPLE_TYPE, SAMPLE_NUMBER, DATE_OF_PROCEDURE, TaxName, TaxNameOther, Abundance) %>%
+  dplyr::arrange(TaxNameOther, desc(Abundance)) 
+
+orderClinic9 <- unique(ClinicTaxNamePropMelt_9$SAMPLE_NAME) 
+#labelsClinic9 <- unique(ClinicTaxNamePropMelt_9$subject_id)
+```
+
+```{r}
+#colorTax <- unique(dataPhylumPropMeltCRS$PhylumOther)
+#colorHex <- unique(dataPhylumPropMeltCRS$Color)
+
+ggplot(data=ClinicTaxNamePropMelt_9, aes(x = SAMPLE_NAME, y = Abundance, fill = TaxNameOther)) +
+  #facet_grid(~DIAG_CRS, scales = "free", space = "free") +
+  geom_bar(aes(), stat="identity", position="stack") + 
+  scale_x_discrete(limits = orderClinic9) +
+  theme_minimal(base_size = 14) + 
+  theme(axis.title.x = element_blank(),
+        #axis.text.x = element_blank(),
+        axis.text.y = element_text(color = "black"),
+        plot.margin = margin(0,0,0,0, "cm"),
+        panel.grid = element_blank()) #+
+  #scale_fill_manual(breaks = colorTax, values = colorHex) #+ 
+  #ggtitle("CRS Samples")
+
+```
+```{r}
+ClinicTaxNamePropMelt_171 <- FESS_Clinic_171 %>%
+  tax_glom("TaxName") %>%
+  transform_sample_counts(function(x) x/sum(x) * 100) %>%
+  psmelt()
+# Make anything with an abundance less than 1% "Other"
+ClinicTaxNamePropMelt_171$TaxName <- as.character(ClinicTaxNamePropMelt_171$TaxName)
+ClinicTaxNamePropMelt_171 <- mutate(ClinicTaxNamePropMelt_171, TaxNameOther = ifelse(Abundance < 1, "Other < 1%", TaxName))
+
+#bugcolors <- read_csv("../docs/CRS_Taxa_Colors.csv")
+#dataPhylumPropMelt <- left_join(dataPhylumPropMelt, bugcolors, by = c("PhylumOther" = "Taxon")) %>%
+#  select(SAMPLE_NAME, subject_id, SAMPLE_NUMBER, SAMPLE_TYPE, SINUS_FACTORS_NUMFESS, SINUS_FACTORS_PRIORFESS, contains("ABX"), Phylum, PhylumOther, Abundance, Color)
+#Separate CRS and non CRS datasets, arrange, and get sample names for plotting
+ClinicTaxNamePropMelt_171 <- ClinicTaxNamePropMelt_171 %>%
+#  filter(SAMPLE_TYPE == "FESS",
+#        SAMPLE_NUMBER == "1") %>%
+  select(SAMPLE_NAME, subject_id, SAMPLE_TYPE, SAMPLE_NUMBER, DATE_OF_PROCEDURE, TaxName, TaxNameOther, Abundance) %>%
+  dplyr::arrange(TaxNameOther, desc(Abundance)) 
+
+orderClinic171 <- unique(ClinicTaxNamePropMelt_171$SAMPLE_NAME) 
+#labelsClinic171 <- unique(ClinicTaxNamePropMelt_171$subject_id)
+```
+
+```{r}
+#colorTax <- unique(dataPhylumPropMeltCRS$PhylumOther)
+#colorHex <- unique(dataPhylumPropMeltCRS$Color)
+
+ggplot(data=ClinicTaxNamePropMelt_171, aes(x = SAMPLE_NAME, y = Abundance, fill = TaxNameOther)) +
+  #facet_grid(~DIAG_CRS, scales = "free", space = "free") +
+  geom_bar(aes(), stat="identity", position="stack") + 
+  scale_x_discrete(limits = orderClinic171) +
+  theme_minimal(base_size = 14) + 
+  theme(axis.title.x = element_blank(),
+        #axis.text.x = element_blank(),
+        axis.text.y = element_text(color = "black"),
+        plot.margin = margin(0,0,0,0, "cm"),
+        panel.grid = element_blank()) #+
+  #scale_fill_manual(breaks = colorTax, values = colorHex) #+ 
+  #ggtitle("CRS Samples")
+
+```
+
+# Second Samples
+## Filter Data
+```{r}
+sample_names(data)
+```
+
+```{r}
+# Samples with seconds
+seconds <- subset_samples(data, SAMPLE_NUMBER == "2")
+unique(sample_names(seconds)) # 171 wrongly has a clinic sample listed as "2"
+secondsNames <- c("9","11","21","115")
+# Filter data to get all FESS samples with seconds
+secondsData <- subset_samples(data, subject_id %in% secondsNames &
+                                SAMPLE_TYPE == "FESS") %>% 
+  filter_taxa(.,function(x) sum(x) > 0, TRUE)
+secondsData
+sample_names(secondsData)
+```
+
+## Stacked bargraphs
+## TaxName Level
+```{r}
+secondsDataTaxNamePropMelt <- secondsData %>%
+  tax_glom("TaxName") %>%
+  transform_sample_counts(function(x) x/sum(x) * 100) %>%
+  psmelt() %>%
+  filter(Abundance > 0) %>%
+  mutate(secondsDataTaxNamePropMelt, TaxNameOther = ifelse(Abundance < .1, "Other < .1%", TaxName)) %>%
+  dplyr::arrange(TaxNameOther, desc(Abundance)) %>%
+  select(SAMPLE_NAME, subject_id, SAMPLE_NUMBER, SAMPLE_TYPE, DATE_OF_PROCEDURE, Phylum, TaxName, TaxNameOther, everything())
+
+orderXCRSseconds <- unique(secondsDataTaxNamePropMelt$SAMPLE_NAME) 
+labelsXCRSseconds <- unique(secondsDataTaxNamePropMelt$subject_id)
+unique(secondsDataTaxNamePropMelt$TaxNameOther)
+```
+
+```{r}
+barplot.seconds.taxname.prop <- ggplot(data=secondsDataTaxNamePropMelt, aes(x = SAMPLE_NAME, y = Abundance, fill = TaxNameOther)) +
+  facet_grid(~subject_id, scales = "free", space = "free") +
+  geom_bar(aes(), stat="identity", position="stack") + 
+  scale_x_discrete(#limits = orderXCRS,
+                   labels = "SAMPLE_NUMBER") +
+  theme_minimal(base_size = 14) + 
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(color = "black"),
+        plot.margin = margin(0,0,0,0, "cm"),
+        panel.grid = element_blank())
+#scale_fill_manual(breaks = colorTax, values = colorHex) #+ 
+  #ggtitle("CRS Samples")
+barplot.seconds.taxname.prop
+```
+## Heatmap
+### Convert phyloseq to ampvis2 object
+```{r}
+#Combine OTU abundance table and taxonomy table from the phyloseq object "my_phyloseq_object":
+secondsObj <- secondsData
+# Make short names for OTUs - facilitates later plotting ease when amp_heatmap has the option tax_empty = "best" (for some reason)
+taxa_names(secondsObj) <- paste0("ASV", seq(ntaxa(secondsObj)))
+# Fix OTU table layout for exporting. taxa_as_rows = FALSE was not working.
+Totu_table =t(otu_table(secondsObj))
+otu_table(secondsObj)=Totu_table
+#export OTU table from phyloseq object
+otutable <- data.frame(OTU = rownames(phyloseq::otu_table(secondsObj)@.Data),
+                       phyloseq::otu_table(secondsObj)@.Data,
+                       phyloseq::tax_table(secondsObj)@.Data,
+                       check.names = FALSE
+                       )
+otutable <- otutable %>% select(-OTU, 
+                                -TaxName, # Remove special taxa formatting
+                                -Genus_Species2, # Remove special taxa formatting
+                                )
+
+#Extract metadata from the phyloseq object:
+metadata <- data.frame(phyloseq::sample_data(secondsObj), 
+                       check.names = FALSE
+                       )
+metadata <- rownames_to_column(metadata, var = "SAMPLE_ID")
+
+# Extract phylogenetic tree from phyloseq object:
+phytree <- phyloseq::phy_tree(secondsObj)
+
+#Load the data with amp_load:
+ampvis.secondsObj <- amp_load(otutable, metadata,
+                       tree = phytree
+                        )
+ampvis.secondsObj
+```
+### Heatmaps
+```{r}
+heatmap.secondsCRS <- amp_heatmap(ampvis.secondsObj,
+                           tax_aggregate = "Species",
+                           tax_add = "Genus",
+                           tax_empty = "Family",
+                           tax_show = 20,
+                           plot_values = FALSE,
+                           plot_colorscale = "log10",
+                           normalise = TRUE,
+                           order_x_by = "cluster",
+                           group_by = "SAMPLE_NUMBER",
+                           facet_by = "subject_id"
+                           #color_vector = c("whitesmoke", "red")
+                           ) + 
+#  coord_fixed(ratio=1) +  #Make the boxes square
+  theme_minimal(base_size = 14) +
+  theme(axis.text.y = element_text(face = "italic", color = "black"),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        legend.position = "right",
+        legend.title = element_blank(),
+        #plot.margin = unit(c(0,0,0,0), "cm")
+  )
+heatmap.secondsCRS
+```
+
+
+Calculate jaccard distances between the sample pairs:
+```{r}
+secondsSamdf <- data.frame(sample_data(secondsData)) %>%
+  select(SAMPLE_NAME, subject_id, SAMPLE_NUMBER)
+secondsDates <- data.frame(sample_data(secondsData)) %>%
+  select(SAMPLE_NAME, DATE_OF_PROCEDURE)
+jaccardSeconds <- secondsData %>%
+  tax_glom("TaxName") %>%
+  distance(., method = "unifrac", type = "samples") %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column("SAMPLE_NAME_1") %>%
+  pivot_longer(cols = -SAMPLE_NAME_1, names_to = "SAMPLE_NAME_2", values_to = "unifrac") %>%
+  left_join(secondsSamdf, by = c("SAMPLE_NAME_1" = "SAMPLE_NAME")) %>%
+  left_join(secondsSamdf, by = c("SAMPLE_NAME_2" = "SAMPLE_NAME")) %>%
+  filter(SAMPLE_NUMBER.x == "1",
+         SAMPLE_NUMBER.y == "2",
+         !unifrac == 0,
+         subject_id.x == subject_id.y) %>%
+  left_join(secondsDates, by = c("SAMPLE_NAME_1" = "SAMPLE_NAME")) %>%
+  left_join(secondsDates, by = c("SAMPLE_NAME_2" = "SAMPLE_NAME")) %>%
+  mutate(DOP_DIFFTIME.y = difftime(DATE_OF_PROCEDURE.y, DATE_OF_PROCEDURE.x, units = "days"),
+         DOP_DIFFTIME.x = 0)
+
+firstSamples <- jaccardSeconds %>%
+  select(subject_id = subject_id.x,
+         unifrac, DAYS = DOP_DIFFTIME.x)
+secondSamples <- jaccardSeconds %>%
+  select(subject_id = subject_id.x,
+         unifrac, DAYS = DOP_DIFFTIME.y)
+jaccardSecondsCompare <- bind_rows(firstSamples, secondSamples)
+jaccardSecondsCompare$subject_id <- as.character(jaccardSecondsCompare$subject_id)
+
+ggplot(jaccardSecondsCompare, 
+       aes(x = DAYS, 
+           y = unifrac,
+           color = subject_id,
+           group = subject_id)) +
+  geom_point(size = 3) +
+  geom_line() +
+  theme(legend.position = "right")
+```
+

@@ -1,0 +1,605 @@
+---
+title: "Ordination Analysis"
+---
+# Setup
+```{r}
+library(phyloseq)
+library(viridis)
+library(tidyverse)
+library(ggpubr)
+```
+# Import filtered data
+```{r}
+filtPhyseq <- readRDS("../data/PHYLOSEQ_DATA/phyloseq_filtered_rare.rds")
+filtPhyseq
+summary(sample_sums(filtPhyseq))
+```
+# Import filtered data
+```{r}
+filtPhyseqRare <- readRDS("../data/PHYLOSEQ_DATA/phyloseq_filtered_rare.rds")
+filtPhyseqRare
+summary(sample_sums(filtPhyseqRare))
+```
+
+# Transform dataset
+```{r}
+filtPhyseqProp <- transform_sample_counts(filtPhyseq, function(x){100 * x / sum(x)})
+filtPhyseqLog <- transform_sample_counts(filtPhyseq, function(x) log(1 + x))
+```
+
+# Transform rarified dataset
+```{r}
+filtPhyseqRareProp <- transform_sample_counts(filtPhyseqRare, function(x){100 * x / sum(x)})
+filtPhyseqRareLog <- transform_sample_counts(filtPhyseqRare, function(x) log(1 + x))
+```
+
+# Ordination - all samples
+
+## Method Exploration
+Run through some quick ordination plots to look at different ordinations methods
+```{r}
+dist = "wunifrac"
+ord_meths = c("DCA", "CCA", "RDA", "DPCoA", "NMDS", "MDS")
+plist = plyr::llply(as.list(ord_meths), function(i, physeq, dist){
+        ordi = ordinate(physeq, method=i, distance=dist)
+        plot_ordination(physeq, ordi, "samples", color="DIAG_CRS")
+}, filtPhyseqRareProp, dist)
+```
+```{r}
+names(plist) <- ord_meths
+```
+```{r}
+pdataframe = plyr::ldply(plist, function(x){
+    df = x$data[, 1:2]
+    colnames(df) = c("Axis_1", "Axis_2")
+    return(cbind(df, x$data))
+})
+names(pdataframe)[1] = "method"
+```
+```{r}
+p = ggplot(pdataframe, aes(Axis_1, Axis_2, color=DIAG_CRS, fill=DIAG_CRS))
+p = p + geom_point(size=4) #+ geom_polygon()
+p = p + facet_wrap(~method, scales="free")
+p = p + geom_text(aes(label=subject_id), color = "black")
+p
+```
+
+
+## Double Principal Coordinates
+```{r, width = 8, height = 7}
+# DPCoA Ordination
+dpcoa_ordination <- ordinate(filtPhyseqLog, "DPCoA" ) 
+dpcoa_evals <- dpcoa_ordination$eig
+plot_scree(dpcoa_ordination)
+```
+```{r}
+# Plot DPCoA for samples
+dpcoa_ordination_plot_samples <- plot_ordination(filtPhyseqLog, dpcoa_ordination, 
+                                                 type = "samples", 
+                                                 color = "DIAG_CRS",
+                                                 #color = "DIAG_CRS"#, 
+                                                 shape = "DIAG_CRS",
+                                                 ) +
+  geom_text(mapping = aes(label = subject_id), size = 5, color = "red", vjust = 2) +
+  geom_point(alpha = 1, size = 3.5) +
+  scale_shape_manual(values = c(1,16)) +
+  scale_color_manual(values = c("black","black")) +
+  theme_classic() +
+  theme(
+    legend.position = "",
+    legend.text = element_text(color = "black"),
+    legend.title = element_blank(),
+    axis.line = element_blank(),
+    axis.ticks = element_line(color = "black"),
+    axis.text = element_text(color = "black", size = 14),
+    axis.title = element_text(color = "black", size = 16),
+    panel.border = element_rect(fill = "transparent", color = "black"),
+    panel.background = element_rect(fill = "transparent"), # bg of the panel
+    plot.background = element_rect(fill = "transparent", color = NA), # bg of the plot
+    panel.grid.major = element_line(color = "transparent"), # get rid of major grid
+    panel.grid.minor = element_line(color = "transparent"), # get rid of minor grid
+    legend.background = element_rect(fill = "transparent"), # get rid of legend bg
+    legend.box.background = element_rect(fill = "transparent", color = "transparent") # get rid of legend panel bg
+    ) +
+  guides(color = guide_legend(override.aes = list(fill="transparent"))) +
+  geom_hline(yintercept = 0.0, alpha = 1, linetype = 2, color = "black") +
+  geom_vline(xintercept = 0.0, alpha = 1, linetype = 2, color = "black") +
+  coord_fixed(sqrt(dpcoa_evals[2] / dpcoa_evals[1])) #+#
+  #scale_x_continuous(limits = c(-0.75, .25),
+  #                   breaks = c(-0.75,-.5,-.25,0,.25)) +
+  #scale_y_continuous(limits = c(-.2,.4),
+  #                   breaks = c(-.2,0,.2,.4)) 
+
+# Get rid of point within point
+dpcoa_ordination_plot_samples$layers <- dpcoa_ordination_plot_samples$layers[-1]
+dpcoa_ordination_plot_samples
+```
+```{r}
+ggsave(dpcoa_ordination_plot_samples, 
+       filename = "../figures/ordination/dpcoa-samples.png",
+       device = "png",
+       height = 3.5,
+       width = 5.5)
+```
+
+```{r}
+OrdLegendSamples <- get_legend(dpcoa_ordination_plot_samples + theme(legend.position = "bottom", legend.title = element_blank()))
+ggsave(OrdLegendSamples, filename = "../figures/DPCoASampleLegend.pdf",
+       height = 2, width = 5,
+       useDingbats = FALSE)
+```
+
+
+```{r}
+phylum.colors <- c( "#de2d26", #Actino
+                   "#009E73", #Bacteroidetes
+                   "#66209d", #Epsiloniarchaeota
+                   "#E69F00", #Firmicutes
+                   "#F0E442", #Fusobacteria
+                   "#D55E00", #Pastesci
+                   "#0072B2", #Proteo
+                   "#CC79A7",  #Spirochaetes 
+                   "purple", #Synergestites
+                   "black", #Tenericutes
+                   "grey") #Verruco
+```
+
+```{r}
+# Plot DPCoA scores for taxa
+dpcoa_ordination_plot_taxa <- plot_ordination(filtPhyseqLog, dpcoa_ordination, 
+                                              type = "taxa", 
+                                              color = "Phylum") +
+  geom_point(alpha = 1, size = 3.5) +
+  scale_color_manual(values = phylum.colors) +
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    legend.text = element_text(color = "black"),
+    legend.title = element_blank(),
+    axis.line = element_blank(),
+    axis.ticks = element_line(color = "black"),
+    axis.text = element_text(color = "black", size = 14),
+    axis.title = element_text(color = "black", size = 16),
+    panel.border = element_rect(fill = "transparent", color = "black"),
+    panel.background = element_rect(fill = "transparent"),
+    plot.background = element_rect(fill = "transparent", color = NA), 
+    panel.grid.major = element_line(color = "transparent"),
+    panel.grid.minor = element_line(color = "transparent"),
+    legend.background = element_rect(fill = "transparent"),
+    legend.box.background = element_rect(fill = "transparent", color = "transparent"),
+    ) +
+  guides(#col = guide_legend(ncol = 1),
+         color = guide_legend(override.aes = list(fill="transparent"))) +
+  geom_hline(yintercept = 0.0, alpha = 1, linetype = 2, color = "black") +
+  geom_vline(xintercept = 0.0, alpha = 1, linetype = 2, color = "black") +
+  coord_fixed(sqrt(dpcoa_evals[2] / dpcoa_evals[1])) #+
+  #scale_x_continuous(limits = c(-0.75, .25),
+  #                   breaks = c(-0.75,-.5,-.25,0,.25)) +
+  #scale_y_continuous(limits = c(-.2,.4),
+  #                   breaks = c(-.2,0,.2,.4))
+# Get rid of point within point
+dpcoa_ordination_plot_taxa$layers <- dpcoa_ordination_plot_taxa$layers[-1]
+dpcoa_ordination_plot_taxa
+
+```
+
+```{r}
+OrdLegendTaxa <- get_legend(dpcoa_ordination_plot_taxa + theme(legend.position = "bottom", legend.title = element_blank()))
+#ggsave(OrdLegendTaxa, filename = "../figures/DPCoAPhylumLegend.pdf",
+#       height = 2, width = 5,
+#       useDingbats = FALSE)
+```
+```{r}
+biplot.colors <- c( "black", # Samples
+                    "#de2d26", #Actino
+                   "#009E73", #Bacteroidetes
+                   "#66209d", #Epsiloniarchaeota
+                   "#E69F00", #Firmicutes
+                   "#F0E442", #Fusobacteria
+                   "#D55E00", #Pastesci
+                   "#0072B2", #Proteo
+                   "#CC79A7",  #Spirochaetes 
+                   "purple", #Synergestites
+                   "pink", #Tenericutes
+                   "grey") #Verruco
+```
+
+```{r}
+# Plot DPCoA scores for taxa
+dpcoa_ordination_biplot <- plot_ordination(filtPhyseqLog, dpcoa_ordination, 
+                                              type = "biplot", 
+                                              color = "Phylum",
+                                           shape = "SAMPLE_TYPE") +
+  geom_point(alpha = 1, size = 3) +
+  scale_shape_manual(values = c(4,21,19,24)) +
+  scale_color_manual(values = biplot.colors) +
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    legend.text = element_text(color = "black"),
+    legend.title = element_blank(),
+    axis.line = element_blank(),
+    axis.ticks = element_line(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    panel.border = element_rect(fill = "transparent", color = "black"),
+plot.margin = unit(c(0,0,0,0), "cm")) +
+  guides(#col = guide_legend(ncol = 1),
+         color = guide_legend(override.aes = list(fill="transparent"))) +
+  geom_hline(yintercept = 0.0, alpha = 1, linetype = 2, color = "black") +
+  geom_vline(xintercept = 0.0, alpha = 1, linetype = 2, color = "black") +
+  coord_fixed(sqrt(dpcoa_evals[2] / dpcoa_evals[1]))
+# Get rid of point within point
+dpcoa_ordination_biplot$layers <- dpcoa_ordination_biplot$layers[-1]
+dpcoa_ordination_biplot
+
+```
+```{r}
+ggsave(dpcoa_ordination_biplot, 
+       filename = "../figures/ordination/dpcoa-phylum-biplot.pdf",
+       device = "pdf",
+       height = 4.5,
+       width = 8,
+       useDingbats = FALSE)
+```
+
+
+
+```{r}
+# Put it all together
+dpcoa_split_plot <- cowplot::plot_grid(dpcoa_ordination_plot_samples, dpcoa_ordination_plot_taxa, ncol = 2, align = "h", rel_heights = c(1,1))
+dpcoa_split_plot
+```
+
+
+```{r}
+# Plot DPCoA for samples
+dpcoa_ordination_plot_SNOT20 <- plot_ordination(filtPhyseqLog, dpcoa_ordination, 
+                                                 type = "samples", 
+                                                 color = "SNOT20_TOTAL",
+                                                 #color = "DIAG_CRS"#, 
+                                                 shape = "SAMPLE_TYPE"
+                                                 ) +
+  geom_point(alpha = 0.8, size = 3) +
+  theme_classic() +
+  coord_fixed(sqrt(dpcoa_evals[2] / dpcoa_evals[1])) +
+  scale_color_viridis() +
+  scale_shape_manual(values = c(15,16,17)) #For catagorical variables
+
+# Get rid of point within point
+dpcoa_ordination_plot_SNOT20$layers <- dpcoa_ordination_plot_SNOT20$layers[-1]
+dpcoa_ordination_plot_SNOT20
+```
+# Ordination - Sinus Only
+Just separate out sinus samples for now:
+
+```{r}
+FESS <- subset_samples(filtPhyseqRare, SAMPLE_TYPE == "FESS" & SAMPLE_NUMBER == "1") %>% filter_taxa(., function(x) sum(x) > 0, TRUE)
+FESS
+```
+# Transform dataset
+```{r}
+FESSprop <- transform_sample_counts(FESS, function(x){100 * x / sum(x)})
+FESSlog <- transform_sample_counts(FESS, function(x) log(1 + x))
+```
+
+Run through some quick ordination plots to look at different ordinations methods
+```{r}
+dist = "wunifrac"
+ord_meths = c("DCA", "CCA", "RDA", "DPCoA", "NMDS", "MDS")
+plist = plyr::llply(as.list(ord_meths), function(i, physeq, dist){
+        ordi = ordinate(physeq, method=i, distance=dist)
+        plot_ordination(physeq, ordi, "samples", color="DIAG_CRS")
+}, FESSprop, dist)
+```
+```{r}
+names(plist) <- ord_meths
+```
+```{r}
+pdataframe = plyr::ldply(plist, function(x){
+    df = x$data[, 1:2]
+    colnames(df) = c("Axis_1", "Axis_2")
+    return(cbind(df, x$data))
+})
+names(pdataframe)[1] = "method"
+```
+```{r}
+p = ggplot(pdataframe, aes(Axis_1, Axis_2, color=DIAG_CRS, fill=DIAG_CRS))
+p = p + geom_point(size=4) #+ geom_polygon()
+p = p + facet_wrap(~method, scales="free")
+p = p + geom_text(aes(label=subject_id), color = "black")
+p
+```
+
+Look at correlation of the first axis in DPCoA with clinical data:
+```{r}
+pdataframeDPCoA <- filter(pdataframe, method == "DPCoA")
+```
+
+```{r, fig.height=4, fig.width=4}
+ggscatter(pdataframeDPCoA, x = "DEM_AGE", y = "Axis_1",
+          add = "reg.line",                         # Add regression line
+          conf.int = TRUE,                          # Add confidence interval
+         # color = "DIAG_CRS",
+          palette = "jco",           # Color by groups "cyl"
+          shape = "DIAG_CRS"                             # Change point shape by groups "cyl"
+          ) +
+  stat_cor(#aes(color = DIAG_CRS)
+    )           # Add correlation coefficient
+```
+
+## wunifrac
+```{r}
+# DPCoA Ordination
+FESS_wuni <- ordinate(FESSprop, 
+                            method = "MDS", 
+                            distance = "wunifrac") 
+FESS_wuni_evals <- FESS_wuni$eig
+plot_scree(FESS_wuni)
+```
+
+```{r}
+# Plot DPCoA scores for taxa
+FESS_wuni_mda_splitplot <- plot_ordination(FESSprop, FESS_wuni, type = "split", color = "Phylum", shape = "SAMPLE_TYPE") +
+  geom_point(alpha = 1, size = 3) +
+  scale_shape_manual(values = c(4,19)) +
+  scale_color_manual(values = biplot.colors) +
+  theme_pubr(base_size = 10) +
+  theme(
+    legend.position = "right",
+    legend.text = element_text(color = "black"),
+    legend.title = element_blank(),
+    axis.line = element_blank(),
+    axis.ticks = element_line(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    panel.border = element_rect(fill = "transparent", color = "black"),
+plot.margin = unit(c(0,0,0,0), "cm")) +
+  guides(#col = guide_legend(ncol = 1),
+         color = guide_legend(override.aes = list(fill="transparent"))) +
+  geom_hline(yintercept = 0.0, alpha = 1, linetype = 2, color = "black") +
+  geom_vline(xintercept = 0.0, alpha = 1, linetype = 2, color = "black")# +
+  #coord_fixed(sqrt(FESS_wuni_evals[2] / FESS_wuni_evals[1]))
+# Get rid of point within point
+FESS_wuni_mda_splitplot$layers <- FESS_wuni_mda_splitplot$layers[-1]
+FESS_wuni_mda_splitplot
+
+```
+## Double Principal Coordinates
+```{r, width = 8, height = 7}
+# DPCoA Ordination
+FESS_dpcoa <- ordinate(FESSprop, "DPCoA") 
+FESS_dpcoa_evals <- FESS_dpcoa$eig
+plot_scree(FESS_dpcoa)
+```
+```{r}
+# Plot DPCoA scores for taxa
+FESS_dpcoa_splitplot <- plot_ordination(FESSprop, FESS_dpcoa, type = "split", color = "Order", shape = "SAMPLE_TYPE") +
+  geom_point(alpha = .7, size = 3) +
+  scale_shape_manual(values = c(20,19)) +
+#  scale_color_manual(values = biplot.colors) +
+  theme_pubr(base_size = 10) +
+  theme(
+    legend.position = "right",
+    legend.text = element_text(color = "black"),
+    legend.title = element_blank(),
+    axis.line = element_blank(),
+    axis.ticks = element_line(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    panel.border = element_rect(fill = "transparent", color = "black"),
+plot.margin = unit(c(0,0,0,0), "cm")) +
+  guides(#col = guide_legend(ncol = 1),
+         color = guide_legend(override.aes = list(fill="transparent"))) +
+  geom_hline(yintercept = 0.0, alpha = 1, linetype = 2, color = "black") +
+  geom_vline(xintercept = 0.0, alpha = 1, linetype = 2, color = "black") +
+  coord_fixed(sqrt(FESS_dpcoa_evals[2] / FESS_dpcoa_evals[1]))
+# Get rid of point within point
+FESS_dpcoa_splitplot$layers <- FESS_dpcoa_splitplot$layers[-1]
+FESS_dpcoa_splitplot
+```
+
+```{r}
+# Plot DPCoA scores for taxa
+FESS_dpcoa_samples <- plot_ordination(FESSprop, FESS_dpcoa, type = "samples") + 
+  ggtitle("CF-CRS Samples") +
+  geom_point(alpha = .5, shape = 21, size = 3, fill = "black", color = "black") +
+  scale_y_continuous(limits = c(-.2,.6),
+                     breaks = c(-.2,0,.2,.4,.6)) +
+  theme_pubr(base_size = 10) +
+  theme(
+    plot.title = element_text(size = 12, face = "bold"),
+    legend.position = "right",
+    legend.text = element_text(color = "black"),
+    legend.title = element_blank(),
+    axis.line = element_blank(),
+    axis.ticks = element_line(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    panel.border = element_rect(fill = "transparent", color = "black")
+    ) +
+  guides(col = guide_legend(ncol = 1),
+         color = guide_legend(override.aes = list(fill="transparent"))) +
+  geom_hline(yintercept = 0.0, alpha = 1, linetype = 2, color = "black") +
+  geom_vline(xintercept = 0.0, alpha = 1, linetype = 2, color = "black") +
+  coord_fixed(sqrt(FESS_dpcoa_evals[2] / FESS_dpcoa_evals[1])) 
+# Get rid of point within point
+FESS_dpcoa_samples$layers <- FESS_dpcoa_samples$layers[-1]
+```
+```{r}
+# Plot DPCoA scores for taxa
+FESS_dpcoa_taxa <- plot_ordination(FESSprop, FESS_dpcoa, type = "taxa", color = "Phylum") + 
+  ggtitle("Phylum Level Taxa") +
+  geom_point(alpha = .5, shape = 20, size = 5) +
+  scale_color_manual(values = phylum.colors) +
+  scale_y_continuous(limits = c(-.2,.6),
+                     breaks = c(-.2,0,.2,.4,.6)) +
+  theme_pubr(base_size = 10) +
+  theme(
+    plot.title = element_text(size = 12, face = "bold"),
+    legend.position = "",
+    legend.text = element_text(color = "black"),
+    legend.title = element_blank(),
+    axis.line = element_blank(),
+    axis.ticks = element_line(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    panel.border = element_rect(fill = "transparent", color = "black")
+    ) +
+  guides(#col = guide_legend(ncol = 1),
+         color = guide_legend(override.aes = list(fill="transparent"))) +
+  geom_hline(yintercept = 0.0, alpha = 1, linetype = 2, color = "black") +
+  geom_vline(xintercept = 0.0, alpha = 1, linetype = 2, color = "black") +
+  coord_fixed(sqrt(FESS_dpcoa_evals[2] / FESS_dpcoa_evals[1])) + 
+  ggtitle("Phylum Level Taxa")
+# Get rid of point within point
+FESS_dpcoa_taxa$layers <- FESS_dpcoa_taxa$layers[-1]
+```
+
+```{r}
+dpcoa_legend <- get_legend(FESS_dpcoa_taxa + theme(legend.position = "right"))
+ggsave(dpcoa_legend, filename = "../figures/ordination/dpcoa_phylum_legend.pdf",
+       height = 3, width = 2)
+```
+
+
+```{r, fig.height=7, fig.width=5}
+dpcoa_samples_taxa <- plot_grid(FESS_dpcoa_samples, FESS_dpcoa_taxa,
+                                ncol = 1, align = "v")
+dpcoa_samples_taxa
+```
+```{r}
+ggsave(dpcoa_samples_taxa, filename = "../figures/ordination/dpcoa-samples-phylum.pdf",
+       device = "pdf",
+       height = 5,
+       width = 4,
+       useDingbats = FALSE)
+```
+
+## Look at Sinus Factors
+For DF508 we have to recalc distances
+```{r}
+# Remove sample that is NA for genotype data
+FESSpropNo87 <- subset_samples(FESSprop, !subject_id == "87")  %>% filter_taxa(., function(x) sum(x) > 0, TRUE)
+
+# Get dataframe of sample data for this dataset
+sampledfNo87 <- data.frame(sample_data(FESSpropNo87))
+# Calculate distance matrix
+dpcoaNo87 <- phyloseq::distance(FESSpropNo87, method = "dpcoa")
+# Adonis test - dF508
+adonis(dpcoaNo87 ~ HOMO_dF508, data = sampledfNo87)
+# Calculate ordination to plot
+dpcoaNo87ord <- ordinate(FESSpropNo87, "DPCoA") 
+# Plot Ordination
+ord <- plot_ordination(FESSpropNo87, dpcoaNo87ord, type = "samples", color = "HOMO_dF508")
+ord
+```
+
+
+```{r fig.width=10, fig.height=10}
+cat_colors <- c("dodgerblue","red", "grey")
+theme_set(theme_bw())
+# Plot DPCoA scores for categorical variables
+# SINUS FACTORS
+FESS_dpcoa_samples_polyps <- plot_ordination(FESSprop, FESS_dpcoa, type = "samples", color = as.character("SINUS_FACTORS_POLYPS")) + geom_point(size = 3, alpha = 0.75) + theme(legend.title = element_blank()) + scale_color_manual(values = cat_colors) + theme(legend.position = "") + ggtitle("Polyps")
+FESS_dpcoa_samples_asthma <- plot_ordination(FESSprop, FESS_dpcoa, type = "samples", color = as.character("SINUS_FACTORS_ASTHMA")) + geom_point(size = 3, alpha = 0.75) + theme(legend.position = "") + scale_color_manual(values = cat_colors) + ggtitle("Asthma")
+FESS_dpcoa_samples_gerd <- plot_ordination(FESSprop, FESS_dpcoa, type = "samples", color = as.character("SINUS_FACTORS_GERD")) + geom_point(size = 3, alpha = 0.75) + theme(legend.position = "") + scale_color_manual(values = cat_colors) + ggtitle("GERD")
+FESS_dpcoa_samples_allergies <- plot_ordination(FESSprop, FESS_dpcoa, type = "samples", color = as.character("SINUS_FACTORS_ALLERGIES")) + geom_point(size = 3, alpha = 0.75) + theme(legend.position = "") + scale_color_manual(values = cat_colors) + ggtitle("Allergies")
+FESS_dpcoa_samples_priorfess <- plot_ordination(FESSprop, FESS_dpcoa, type = "samples", color = as.character("SINUS_FACTORS_PRIORFESS")) + geom_point(size = 3, alpha = 0.75) + theme(legend.position = "") + scale_color_manual(values = cat_colors) + ggtitle("Prior FESS")
+FESS_dpcoa_samples_dF508 <- plot_ordination(FESSpropNo87, dpcoaNo87ord, type = "samples", color = as.character("HOMO_dF508")) + geom_point(size = 3, alpha = 0.75) + scale_color_manual(values = cat_colors) + ggtitle("DF508")
+
+# Remove point in first layer for aesthetic purposes
+FESS_dpcoa_samples_polyps$layers <- FESS_dpcoa_samples_polyps$layers[-1]
+FESS_dpcoa_samples_asthma$layers <- FESS_dpcoa_samples_asthma$layers[-1]
+FESS_dpcoa_samples_gerd$layers <- FESS_dpcoa_samples_gerd$layers[-1]
+FESS_dpcoa_samples_allergies$layers <- FESS_dpcoa_samples_allergies$layers[-1]
+FESS_dpcoa_samples_priorfess$layers <- FESS_dpcoa_samples_priorfess$layers[-1]
+FESS_dpcoa_samples_dF508$layers <- FESS_dpcoa_samples_dF508$layers[-1]
+# Plot grid
+FESS_dpcoa_samples_legend <- get_legend(FESS_dpcoa_samples_DF508)
+FESS_dpcoa_sinusfactors <- plot_grid(FESS_dpcoa_samples_polyps,
+                                     FESS_dpcoa_samples_asthma,FESS_dpcoa_samples_gerd, FESS_dpcoa_samples_allergies, 
+                                     FESS_dpcoa_samples_priorfess, 
+                                     FESS_dpcoa_samples_dF508 + theme(legend.position = ""),
+                                     nrow = 3, ncol = 3)
+FESS_dpcoa_sinusfactors
+FESS_dpcoa_samples_legend <- plot_grid(FESS_dpcoa_samples_legend)
+FESS_dpcoa_samples_legend
+```
+```{r}
+ggsave(FESS_dpcoa_sinusfactors, 
+       filename = "../figures/ordination/dpcoa-sinus-factors.pdf",
+       device = "pdf",
+       height = 7,
+       width = 7,
+       useDingbats = FALSE)
+```
+
+
+```{r}
+set.seed(1)
+
+# Calculate bray curtis distance matrix
+dpcoa <- phyloseq::distance(FESSprop, method = "dpcoa")
+
+# make a data frame from the sample_data
+sampledf <- data.frame(sample_data(FESSprop))
+
+# Adonis test
+adonis(dpcoa ~ SINUS_FACTORS_POLYPS, data = sampledf)
+
+# Adonis test - asthma
+adonis(dpcoa ~ SINUS_FACTORS_ASTHMA, data = sampledf)
+
+# Adonis test - allergies
+adonis(dpcoa ~ SINUS_FACTORS_ALLERGIES, data = sampledf)
+
+# Adonis test - GERD
+adonis(dpcoa ~ SINUS_FACTORS_GERD, data = sampledf)
+# Adonis test - Number of FESS
+adonis(dpcoa ~ SINUS_FACTORS_PRIORFESS, data = sampledf)
+
+
+
+
+
+```
+
+
+
+```{r}
+# Plot DPCoA scores for taxa
+FESS_dpcoa_samples_snot20 <- plot_ordination(FESSprop, FESS_dpcoa, type = "samples", color = "DEM_AGE") +
+  geom_point(alpha = 1, size = 3) +
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    legend.text = element_text(color = "black"),
+    legend.title = element_blank(),
+    axis.line = element_blank(),
+    axis.ticks = element_line(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    panel.border = element_rect(fill = "transparent", color = "black"),
+plot.margin = unit(c(0,0,0,0), "cm")) +
+  guides(#col = guide_legend(ncol = 1),
+         color = guide_legend(override.aes = list(fill="transparent"))) +
+  geom_hline(yintercept = 0.0, alpha = 1, linetype = 2, color = "black")
+  geom_vline(xintercept = 0.0, alpha = 1, linetype = 2, color = "black") #+
+  #coord_fixed(sqrt(FESS_dpcoa_evals[2] / FESS_dpcoa_evals[1]))
+# Get rid of point within point
+#FESS_dpcoa_samples_snot20$layers <- FESS_dpcoa_samples_snot20$layers[-1]
+FESS_dpcoa_samples_snot20
+```
+correlation with the first axis and age?
+
+
+
+
+
+Notes:
+
+Comparisons to make:
+- Look at genotype? OR class. Differences in dF508 vs heterogeneous.
+- Look at SNOT20 scores when get it.
+- Do ordinations without sputum samples.

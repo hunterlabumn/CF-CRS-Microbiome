@@ -1,0 +1,484 @@
+---
+title: "16S Sequence Analysis of CRS sinus samples from cystic fibrosis patients"
+output:
+  pdf_document: default
+  html_notebook: default
+date: "June 2020"
+---
+# Description
+
+This notebook is to document the identification and analysis of ribosomal sequence variants (RSV) from 16S sequencing data from sinus mucus isolated from pateints with CF associated CRS. This will be done using the DADA2 package developed by Benjamin Callahan, formerly of Susan Holmes' group at Stanford (Publication: http://www.nature.com/nmeth/journal/v13/n7/full/nmeth.3869.html?foxtrotcallback=true) (DADA2 Github: https://benjjneb.github.io/dada2/tutorial.html). RSVs are inferred using the DADA2 error modeling for each run individually, as there may be run-specific errors present. Subsequent diversity analysis will be carried out using the Phyloseq package, also from the Holmes group (Phylosq Github: https://joey711.github.io/phyloseq/index.html).
+
+# DADA2 inference of ASVs
+## Setup environment
+```{r}
+.cran_packages <- c("tidyverse", "gridExtra", "ips")
+.bioc_packages <- c("dada2", "phyloseq", "DECIPHER", "phangorn", "ShortRead")
+
+.inst <- .cran_packages %in% installed.packages()
+if(any(!.inst)) {
+   install.packages(.cran_packages[!.inst])
+}
+.inst <- .bioc_packages %in% installed.packages()
+if(any(!.inst)) {
+   BiocManager::install(.bioc_packages[!.inst], quietly = FALSE)
+}
+# Load packages into session, and print package version
+sapply(c(.cran_packages, .bioc_packages), require, character.only = TRUE)
+
+# Setting seed for reproducibility
+set.seed(022019)
+```
+
+# Reading in sequences, quality filtering and trimming.
+## Run 1
+```{r}
+# File parsing
+path_1 <- "../data/FASTQ/AE51B/cutadapt/"
+fastqFs_1 <- sort(list.files(path_1, pattern="_R1_001.fastq.gz", full.names = TRUE))
+fastqRs_1 <- sort(list.files(path_1, pattern="_R2_001.fastq.gz", full.names = TRUE))
+if(length(fastqFs_1) != length(fastqRs_1)) stop("Forward and reverse files do not match.")
+```
+```{r}
+pf1 <- plotQualityProfile(fastqFs_1[1:6])
+pf1
+pr1 <- plotQualityProfile(fastqRs_1[1:6])
+pr1
+```
+```{r}
+fastqFs_1 <- sort(list.files(path_1, pattern="_R1_001.fastq.gz", full.names = F))
+fastqRs_1 <- sort(list.files(path_1, pattern="_R2_001.fastq.gz", full.names = F))
+if(length(fastqFs_1) != length(fastqRs_1)) stop("Forward and reverse files do not match.")
+
+filtpath_1 <- file.path(path_1, "filtered") # Filtered forward files go into the pathF/filtered/ subdirectory
+# Filtering: THESE PARAMETERS ARE RUN SPECIFIC DATASETS
+out_1 <- filterAndTrim(fwd=file.path(path_1, fastqFs_1), filt=file.path(filtpath_1, fastqFs_1),
+              rev=file.path(path_1, fastqRs_1), filt.rev=file.path(filtpath_1, fastqRs_1),
+              truncLen=c(200,150), 
+              maxEE=5,
+              rm.phix=TRUE,
+              compress=TRUE, verbose=TRUE, multithread=TRUE)
+head(out_1)
+```
+Quality after trimming
+```{r}
+filtFastqFs_1 <- sort(list.files(filtpath_1, pattern="_R1_001.fastq.gz", full.names = TRUE))
+filtFastqRs_1 <- sort(list.files(filtpath_1, pattern="_R2_001.fastq.gz", full.names = TRUE))
+if(length(filtFastqFs_1) != length(filtFastqRs_1)) stop("Forward and reverse files do not match.")
+```
+
+```{r}
+filtpf1 <- plotQualityProfile(filtFastqFs_1[1:6])
+filtpf1
+filtpr1 <- plotQualityProfile(filtFastqRs_1[1:6])
+filtpr1
+```
+
+## Run 2
+```{r}
+# File parsing
+path_2 <- "../data/FASTQ/AH2MV/cutadapt"
+fastqFs_2 <- sort(list.files(path_2, pattern="_R1_001.fastq.gz", full.names = T))
+fastqRs_2 <- sort(list.files(path_2, pattern="_R2_001.fastq.gz", full.names = T))
+if(length(fastqFs_2) != length(fastqRs_2)) stop("Forward and reverse files do not match.")
+```
+```{r}
+pf2 <- plotQualityProfile(fastqFs_2[1:12])
+pf2
+pr2 <- plotQualityProfile(fastqRs_2[1:12])
+pr2
+```
+```{r}
+# Filtering: Optomized for Run2 Sequences
+filtpath_2 <- file.path(path_2, "filtered") # Filtered forward files go into the pathF/filtered/ subdirectory
+fastqFs_2 <- sort(list.files(path_2, pattern="_R1_001.fastq.gz", full.names = F))
+fastqRs_2 <- sort(list.files(path_2, pattern="_R2_001.fastq.gz", full.names = F))
+# Filtering: Optomized for Run2 Sequences
+out_2 <- filterAndTrim(fwd=file.path(path_2, fastqFs_2), filt=file.path(filtpath_2, fastqFs_2),
+              rev=file.path(path_2, fastqRs_2), filt.rev=file.path(filtpath_2, fastqRs_2),
+              truncLen=c(200,150),
+              maxEE=5,
+              rm.phix=TRUE,
+              compress=TRUE, verbose=TRUE, multithread=TRUE)
+
+head(out_2)
+```
+Quality after trimming
+```{r}
+filtFastqFs_2 <- sort(list.files(filtpath_2, pattern="_R1_001.fastq.gz", full.names = TRUE))
+filtFastqRs_2 <- sort(list.files(filtpath_2, pattern="_R2_001.fastq.gz", full.names = TRUE))
+if(length(filtFastqFs_1) != length(filtFastqRs_1)) stop("Forward and reverse files do not match.")
+```
+
+```{r}
+filtpf2 <- plotQualityProfile(filtFastqFs_2[1:12])
+filtpf2
+filtpr2 <- plotQualityProfile(filtFastqRs_2[1:12])
+filtpr2
+```
+
+## Run 3
+```{r}
+# File parsing
+path_3 <- "../data/FASTQ/AHFM2/cutadapt"
+fastqFs_3 <- sort(list.files(path_3, pattern="_R1_001.fastq.gz", full.names = T))
+fastqRs_3 <- sort(list.files(path_3, pattern="_R2_001.fastq.gz", full.names = T))
+if(length(fastqFs_3) != length(fastqRs_3)) stop("Forward and reverse files do not match.")
+
+pf3 <- plotQualityProfile(fastqFs_3[1:6])
+pf3
+pr3 <- plotQualityProfile(fastqRs_3[1:6])
+pr3
+```
+```{r}
+filtpath_3 <- file.path(path_3, "filtered") # Filtered forward files go into the pathF/filtered/ subdirectory
+fastqFs_3 <- sort(list.files(path_3, pattern="_R1_001.fastq.gz", full.names = F))
+fastqRs_3 <- sort(list.files(path_3, pattern="_R2_001.fastq.gz", full.names = F))
+# Filtering: THESE PARAMETERS ARENT OPTIMAL FOR ALL DATASETS
+out_3 <- filterAndTrim(fwd=file.path(path_3, fastqFs_3), filt=file.path(filtpath_3, fastqFs_3),
+              rev=file.path(path_3, fastqRs_3), filt.rev=file.path(filtpath_3, fastqRs_3),
+              truncLen=c(220,180), 
+              maxEE=5, 
+              rm.phix=TRUE,
+              compress=TRUE, verbose=TRUE, multithread=TRUE)
+head(out_3)
+```
+
+Quality after trimming
+```{r}
+filtFastqFs_3 <- sort(list.files(filtpath_3, pattern="_R1_001.fastq.gz", full.names = TRUE))
+filtFastqRs_3 <- sort(list.files(filtpath_3, pattern="_R2_001.fastq.gz", full.names = TRUE))
+if(length(filtFastqFs_3) != length(filtFastqRs_3)) stop("Forward and reverse files do not match.")
+```
+
+```{r}
+filtpf3 <- plotQualityProfile(filtFastqFs_3[1:12])
+filtpf3
+filtpr3 <- plotQualityProfile(filtFastqRs_3[1:12])
+filtpr3
+```
+
+## Run 4
+```{r}
+# File parsing
+path_4 <- "../data/FASTQ/AN2A6/cutadapt"
+fastqFs_4 <- sort(list.files(path_4, pattern="_R1_001.fastq.gz", full.names = T))
+fastqRs_4 <- sort(list.files(path_4, pattern="_R2_001.fastq.gz", full.names = T))
+if(length(fastqFs_4) != length(fastqRs_4)) stop("Forward and reverse files do not match.")
+
+pf4 <- plotQualityProfile(fastqFs_4[1:12])
+pf4
+pr4 <- plotQualityProfile(fastqRs_4[1:12])
+pr4
+```
+
+```{r}
+filtpath_4 <- file.path(path_4, "filtered") # Filtered forward files go into the pathF/filtered/ subdirectory
+fastqFs_4 <- sort(list.files(path_4, pattern="_R1_001.fastq.gz", full.names = F))
+fastqRs_4 <- sort(list.files(path_4, pattern="_R2_001.fastq.gz", full.names = F))
+# Filtering: THESE PARAMETERS ARENT OPTIMAL FOR ALL DATASETS
+out_4 <- filterAndTrim(fwd=file.path(path_4, fastqFs_4), filt=file.path(filtpath_4, fastqFs_4),
+              rev=file.path(path_4, fastqRs_4), filt.rev=file.path(filtpath_4, fastqRs_4),
+              truncLen=c(220,180),
+              maxEE=5,
+              rm.phix=TRUE,
+              compress=TRUE, verbose=TRUE, multithread=TRUE)
+head(out_4)
+```
+Quality after trimming
+```{r}
+filtFastqFs_4 <- sort(list.files(filtpath_4, pattern="_R1_001.fastq.gz", full.names = TRUE))
+filtFastqRs_4 <- sort(list.files(filtpath_4, pattern="_R2_001.fastq.gz", full.names = TRUE))
+if(length(filtFastqFs_3) != length(filtFastqRs_3)) stop("Forward and reverse files do not match.")
+```
+
+```{r}
+filtpf4 <- plotQualityProfile(filtFastqFs_4[1:12])
+filtpf4
+filtpr4 <- plotQualityProfile(filtFastqRs_4[1:12])
+filtpr4
+```
+
+# Infer Sequence Variants
+This should be run on a run-by-run basis as not all runs will have the same error profiles
+## Run 1
+```{r}
+# File parsing
+filtFs_1 <- list.files(filtpath_1, pattern="_R1_001.fastq.gz", full.names = TRUE)
+filtRs_1 <- list.files(filtpath_1, pattern="_R2_001.fastq.gz", full.names = TRUE)
+sampleNames_1 <- sapply(strsplit(basename(filtFs_1), "_"), `[`, 1) # Assumes filename = samplename_XXX.fastq.gz
+sampleNamesR_1 <- sapply(strsplit(basename(filtRs_1), "_"), `[`, 1) # Assumes filename = samplename_XXX.fastq.gz
+if(!identical(sampleNames_1, sampleNamesR_1)) stop("Forward and reverse files do not match.")
+names(filtFs_1) <- sampleNames_1
+names(filtRs_1) <- sampleNames_1
+set.seed(100)
+# Learn forward error rates
+errF_1 <- learnErrors(filtFs_1, nbases=1e8, multithread=TRUE)
+# Learn reverse error rates
+errR_1 <- learnErrors(filtRs_1, nbases=1e8, multithread=TRUE)
+```
+
+## Run 2
+```{r}
+# File parsing
+filtFs_2 <- list.files(filtpath_2, pattern="_R1_001.fastq.gz", full.names = TRUE)
+filtRs_2 <- list.files(filtpath_2, pattern="_R2_001.fastq.gz", full.names = TRUE)
+sampleNames_2 <- sapply(strsplit(basename(filtFs_2), "_"), `[`, 1) # Assumes filename = samplename_XXX.fastq.gz
+sampleNamesR_2 <- sapply(strsplit(basename(filtRs_2), "_"), `[`, 1) # Assumes filename = samplename_XXX.fastq.gz
+if(!identical(sampleNames_2, sampleNamesR_2)) stop("Forward and reverse files do not match.")
+names(filtFs_2) <- sampleNames_2
+names(filtRs_2) <- sampleNames_2
+set.seed(100)
+# Learn forward error rates
+errF_2 <- learnErrors(filtFs_2, nbases=1e8, multithread=TRUE)
+# Learn reverse error rates
+errR_2 <- learnErrors(filtRs_1, nbases=1e8, multithread=TRUE)
+```
+
+## Run 3
+```{r}
+# File parsing
+filtFs_3 <- list.files(filtpath_3, pattern="_R1_001.fastq.gz", full.names = TRUE)
+filtRs_3 <- list.files(filtpath_3, pattern="_R2_001.fastq.gz", full.names = TRUE)
+sampleNames_3 <- sapply(strsplit(basename(filtFs_3), "_"), `[`, 1) # Assumes filename = samplename_XXX.fastq.gz
+sampleNamesR_3 <- sapply(strsplit(basename(filtRs_3), "_"), `[`, 1) # Assumes filename = samplename_XXX.fastq.gz
+if(!identical(sampleNames_3, sampleNamesR_3)) stop("Forward and reverse files do not match.")
+names(filtFs_3) <- sampleNames_3
+names(filtRs_3) <- sampleNames_3
+set.seed(100)
+# Learn forward error rates
+errF_3 <- learnErrors(filtFs_3, nbases=1e8, multithread=TRUE)
+# Learn reverse error rates
+errR_3 <- learnErrors(filtRs_3, nbases=1e8, multithread=TRUE)
+```
+
+## Run 4
+```{r}
+# File parsing
+filtFs_4 <- list.files(filtpath_4, pattern="_R1_001.fastq.gz", full.names = TRUE)
+filtRs_4 <- list.files(filtpath_4, pattern="_R2_001.fastq.gz", full.names = TRUE)
+sampleNames_4 <- sapply(strsplit(basename(filtFs_4), "_"), `[`, 1) # Assumes filename = samplename_XXX.fastq.gz
+sampleNamesR_4 <- sapply(strsplit(basename(filtRs_4), "_"), `[`, 1) # Assumes filename = samplename_XXX.fastq.gz
+if(!identical(sampleNames_4, sampleNamesR_4)) stop("Forward and reverse files do not match.")
+names(filtFs_4) <- sampleNames_4
+names(filtRs_4) <- sampleNames_4
+set.seed(100)
+# Learn forward error rates
+errF_4 <- learnErrors(filtFs_4, nbases=1e8, multithread=TRUE)
+# Learn reverse error rates
+errR_4 <- learnErrors(filtRs_4, nbases=1e8, multithread=TRUE)
+```
+
+Let's look at the error profiles for each of the dada2 runs
+
+```{r}
+plotErrors(errF_1, nominalQ=TRUE)
+plotErrors(errF_2, nominalQ=TRUE)
+plotErrors(errF_3, nominalQ=TRUE)
+plotErrors(errF_4, nominalQ=TRUE)
+```
+
+
+# Sample Inference
+apply the core inference algorithm to the filtered and trimmed sequence data
+## Run1
+```{r}
+dadaFs_1 <- dada(filtFs_1, err=errF_1, multithread=TRUE)
+dadaRs_1 <- dada(filtRs_1, err=errR_1, multithread=TRUE)
+```
+## Run2
+```{r}
+dadaFs_2 <- dada(filtFs_2, err=errF_2, multithread=TRUE)
+dadaRs_2 <- dada(filtRs_2, err=errR_2, multithread=TRUE)
+```
+## Run3
+```{r}
+dadaFs_3 <- dada(filtFs_3, err=errF_3, multithread=TRUE)
+dadaRs_3 <- dada(filtRs_3, err=errR_3, multithread=TRUE)
+```
+## Run4
+```{r}
+dadaFs_4 <- dada(filtFs_4, err=errF_4, multithread=TRUE)
+dadaRs_4 <- dada(filtRs_4, err=errR_4, multithread=TRUE)
+```
+
+# Merge sequences and make tables
+```{r}
+# Filter out all sequences not within length 245-255 bp, Target is 252bp, with added 10bo of length on either side
+MINLEN <- 250
+MAXLEN <- 256
+```
+
+## Run 1
+```{r}
+mergers_1 <- mergePairs(dadaFs_1, filtFs_1, dadaRs_1, filtRs_1, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+head(mergers_1[[1]])
+seqtab_1 <- makeSequenceTable(mergers_1)
+seqtab_size_filt_1 <- seqtab_1[ ,nchar(colnames(seqtab_1)) %in% seq (MINLEN,MAXLEN)]
+seqtab_size_filt_nochim_1 <- removeBimeraDenovo(seqtab_size_filt_1, method="consensus", multithread=TRUE)
+#Look at fraction of chimeras. Here, chimeras made up about 13.8% of the sequences, but that was only about 2% of total sequence reads
+dim(seqtab_size_filt_1)
+dim(seqtab_size_filt_nochim_1)
+sum(seqtab_size_filt_nochim_1)/sum(seqtab_size_filt_1)
+```
+
+## Run 2
+```{r}
+mergers_2 <- mergePairs(dadaFs_2, filtFs_2, dadaRs_2, filtRs_2, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+head(mergers_2[[1]])
+seqtab_2 <- makeSequenceTable(mergers_2)
+seqtab_size_filt_2 <- seqtab_2[ ,nchar(colnames(seqtab_2)) %in% seq (MINLEN,MAXLEN)]
+seqtab_size_filt_nochim_2 <- removeBimeraDenovo(seqtab_size_filt_2, method="consensus", multithread=TRUE)
+#Look at fraction of chimeras. Here, chimeras made up about 13.8% of the sequences, but that was only about 2% of total sequence reads
+dim(seqtab_size_filt_2)
+dim(seqtab_size_filt_nochim_2)
+sum(seqtab_size_filt_nochim_2)/sum(seqtab_size_filt_2)
+```
+
+## Run 3
+```{r}
+mergers_3 <- mergePairs(dadaFs_3, filtFs_3, dadaRs_3, filtRs_3, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+head(mergers_3[[1]])
+seqtab_3 <- makeSequenceTable(mergers_3)
+seqtab_size_filt_3 <- seqtab_3[ ,nchar(colnames(seqtab_3)) %in% seq (MINLEN,MAXLEN)]
+seqtab_size_filt_nochim_3 <- removeBimeraDenovo(seqtab_size_filt_3, method="consensus", multithread=TRUE)
+#Look at fraction of chimeras. Here, chimeras made up about 13.8% of the sequences, but that was only about 3% of total sequence reads
+dim(seqtab_size_filt_3)
+dim(seqtab_size_filt_nochim_3)
+sum(seqtab_size_filt_nochim_3)/sum(seqtab_size_filt_3)
+```
+
+## Run 4
+```{r}
+mergers_4 <- mergePairs(dadaFs_4, filtFs_4, dadaRs_4, filtRs_4, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+head(mergers_4[[1]])
+seqtab_4 <- makeSequenceTable(mergers_4)
+seqtab_size_filt_4 <- seqtab_4[ ,nchar(colnames(seqtab_4)) %in% seq (MINLEN,MAXLEN)]
+seqtab_size_filt_nochim_4 <- removeBimeraDenovo(seqtab_size_filt_4, method="consensus", multithread=TRUE)
+#Look at fraction of chimeras. Here, chimeras made up about 14.8% of the sequences, but that was only about 4% of total sequence reads
+dim(seqtab_size_filt_4)
+dim(seqtab_size_filt_nochim_4)
+sum(seqtab_size_filt_nochim_4)/sum(seqtab_size_filt_4)
+```
+
+
+# Track Reads through pipeline (come back to this. Have to make for each run)
+```{r}
+getN <- function(x) sum(getUniques(x))
+#Run1
+track_1 <- cbind(out_1, sapply(dadaFs_1, getN), sapply(dadaRs_1, getN), sapply(mergers_1, getN), rowSums(seqtab_size_filt_nochim_1))
+colnames(track_1) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nochim")
+rownames(track_1) <- sampleNames_1
+
+#Run2
+track_2 <- cbind(out_2, sapply(dadaFs_2, getN), sapply(dadaRs_2, getN), sapply(mergers_2, getN), rowSums(seqtab_size_filt_nochim_2))
+colnames(track_2) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nochim")
+rownames(track_2) <- sampleNames_2
+
+#Run3
+track_3 <- cbind(out_3, sapply(dadaFs_3, getN), sapply(dadaRs_3, getN), sapply(mergers_3, getN), rowSums(seqtab_size_filt_nochim_3))
+colnames(track_3) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nochim")
+rownames(track_3) <- sampleNames_3
+
+#Run4
+track_4 <- cbind(out_4, sapply(dadaFs_4, getN), sapply(dadaRs_4, getN), sapply(mergers_4, getN), rowSums(seqtab_size_filt_nochim_4))
+colnames(track_4) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nochim")
+rownames(track_4) <- sampleNames_4
+
+track_all <- rbind(track_1, track_2, track_3, track_4)
+track_all <- as.data.frame(track_all)
+track_all <- rownames_to_column(track_all, "sample")
+colnames(track_all)
+track_all <- track_all %>% mutate(perc_original_sequences = nochim/input*100)
+```
+```{r}
+write_csv(track_all, "../data/DADA2/DADA2_Tracking.csv")
+```
+
+# Combine all sequence tables
+```{r}
+seqtab <- mergeSequenceTables(seqtab_size_filt_nochim_1,
+                              seqtab_size_filt_nochim_2, 
+                              seqtab_size_filt_nochim_3,
+                              seqtab_size_filt_nochim_4
+                              )
+saveRDS(seqtab, "../data/DADA2/seqtab.rds")
+```
+
+
+# Assign Taxonomy 
+## SILVA train set
+```{r}
+# Assign taxonomy SILVA Train Set
+tax_silva <- assignTaxonomy(seqtab, "~/Documents/MICaB/Hunter_Lab/taxonomyTrainingSets/silva_nr_v132_train_set.fa.gz", multithread=TRUE)
+colnames(tax_silva) <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus")
+
+# Write to disk
+#saveRDS(tax_silva, "~/Documents/MICaB/Hunter_Lab/Projects/inProgress/CRS_16S_Sequencing/data/DADA2/tax_final_silva_022019.rds")
+
+## Add species assignment to taxonomy table: https://benjjneb.github.io/dada2/assign.html#species-assignment
+tax_species_silva <- addSpecies(tax_silva, "~/Documents/MICaB/Hunter_Lab/taxonomyTrainingSets/silva_species_assignment_v132.fa.gz", verbose=TRUE, allowMultiple = FALSE)
+colnames(tax_species_silva)  <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+unname(head(tax_species_silva))
+# Write to disk
+saveRDS(tax_species_silva, "../data/DADA2/tax_species_final_silva_MAR2020.rds")
+```
+
+Assign Species with HOMD train set
+```{r}
+## Add species assignment to taxonomy table: https://benjjneb.github.io/dada2/assign.html#species-assignment
+tax_species_silva_HOMD <- addSpecies(tax_silva, "~/Documents/MICaB/Hunter_Lab/taxonomyTrainingSets/HOMD_16S_rRNA_RefSeq_V15.1.p9_dada2_addspecies.fasta", verbose=TRUE, allowMultiple = FALSE)
+colnames(tax_species_silva_HOMD) <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species_HOMD")
+unname(head(tax_species_silva_HOMD))
+```
+I want to keep the SILVA assigned species, but then add the HOMD assigned species as well
+```{r}
+#make rownames for ASVs for each species level taxa table
+tax_species_silva_df <- as.data.frame(tax_species_silva) %>%
+  rownames_to_column('ASV')
+
+tax_species_silva_HOMD_df <- as.data.frame(tax_species_silva_HOMD) %>%
+  rownames_to_column('ASV')
+
+tax_species_silva_HOMD_df_join <- full_join(x = tax_species_silva_df, y = tax_species_silva_HOMD_df, by = c("ASV","Kingdom", "Phylum", "Class", "Order", "Family", "Genus"))
+
+#fix one taxon, Lacnoanaerobaculum cf. to be NA at the species levels in the SILVA assignment, and remove any "sp." assignments from the Species_HOMD column
+tax_species_silva_HOMD_df_join[tax_species_silva_HOMD_df_join == "cf."] <- NA
+tax_species_silva_HOMD_df_join[tax_species_silva_HOMD_df_join == "sp."] <- NA
+
+# If there is no species assignment in the Species_SILVA column, check the Species_HOMD column. If the Species_HOMD column says NA or sp. assign NA.
+tax_species_silva_HOMD_df_join_newspecies <- tax_species_silva_HOMD_df_join %>%
+  mutate(SpeciesCombo = ifelse(!is.na(Species), as.character(Species), as.character(Species_HOMD))) %>%
+  select(ASV, Kingdom, Phylum, Class, Order, Family, Genus, SpeciesCombo) %>%
+  dplyr::rename(Species = SpeciesCombo) %>%
+  column_to_rownames('ASV') %>%
+  as.matrix()
+
+# Write to disk
+saveRDS(tax_species_silva_HOMD_df_join_newspecies, "../data/DADA2/tax_species_final_silva_HOMD.rds")
+```
+
+* There were no disagreements between species assinments shared by both the SILVA and HOMD databases
+* 79 new species were added from the HOMD database that were not in the SILVA species assignments
+
+# Construct phylogenetic tree using the Phangorn R package (method suggested by Callahan/Holmes https://f1000research.com/articles/5-1492/v2)
+```{r}
+# seqtab is the sample:ASV table made in DADA2 - it should contain all samples and ASVs
+seqs <- getSequences(seqtab)
+names(seqs) <- seqs # This propogates the tip labels of the tree
+alignment <- AlignSeqs(DNAStringSet(seqs), anchor=NA)
+
+phang.align <- phyDat(as(alignment, "matrix"), type="DNA")
+dm <- dist.ml(phang.align)
+treeNJ <- NJ(dm)
+fit = pml(treeNJ, data=phang.align)
+fitGTR <- update(fit, k=4, inv=0.2)
+fitGTR <- optim.pml(fitGTR, model="GTR", optInv=TRUE, optGamma=TRUE,
+                      rearrangement = "stochastic", control = pml.control(trace = 0))
+detach("package:phangorn", unload=TRUE)
+saveRDS(fitGTR, "../data/DADA2/fitGTR.rds")
+```

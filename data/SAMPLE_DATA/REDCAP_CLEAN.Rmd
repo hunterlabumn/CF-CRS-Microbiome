@@ -1,0 +1,828 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This notebook is for the preprocessing of RedCap clinical data for the CRS microbial ecology study.
+
+packages
+```{r}
+library(tidyverse)
+library(eeptools)
+```
+# Load in data
+Raw Data (NOT directly imported from REDCAP)
+```{r}
+redcap <- data #from loading MicrobialEcologyFESS_R_2019-10-29_1438.r
+dates <- read_csv("./consent_sample_dates.csv")
+```
+
+
+```{r}
+redcap_dates <- redcap %>%
+  full_join(dates, by=c("subject_id")) %>%
+  select(subject_id:redcap_repeat_instance, 
+         date_enrolled = date_enrolled.y,
+         date_of_procedure:date_of_birth,
+         everything(),
+         -date_enrolled.x,
+)
+```
+
+## Patients with more than one sample
+
+```{r}
+multiSample <- c(9,11,21,115,171)
+```
+
+# Separate out data categories that have multiple values in the longform dataset. These are SNOT-20, Antibiotic Treatment, Clinical Lab Cultures, Pulmonary Function Tests
+
+
+# Demographics
+DONE: First make a basic table of demographic data:
+```{r}
+DEM <- redcap_dates %>%
+  # demographics are found on the first line of each new subject ID. Those lines are 
+  filter(is.na(redcap_repeat_instance)) %>% 
+  select(SUBJECT_ID = subject_id,
+         DATE_ENROLLED = date_enrolled,
+         SAMPLE_TYPE_1 = sample_type_1,
+         DATE_OF_PROCEDURE_1 = date_of_procedure, 
+         DATE_OF_CLINIC_VISIT_1 = clinic_date_1, 
+         PAIRED_SPUTUM_1 = paired_sputum_yes_no_1,
+         SAMPLE_TYPE_2 = sample_type_2,
+         DATE_OF_PROCEDURE_2 = date_of_procedure_2, 
+         DATE_OF_CLINIC_VISIT_2 = clinic_date_2,
+         PAIRED_SPUTUM_2 = paired_sputum_2,
+         DOB = date_of_birth,
+         DEM_SEX = sex.factor, 
+         cf_crs_status.factor,
+         DEM_COMMENTS = comments,
+         DEM_COMPLETE = demographics_complete.factor) %>%
+  separate(col = cf_crs_status.factor, 
+           into = c("DIAG_CF","DIAG_CRS"), 
+           sep = ",") %>%
+  mutate(DIAG_CRS = str_trim(DIAG_CRS)) %>%
+  mutate(DIAG_CRS = recode(DIAG_CRS, "CRS+" = "CRS", "CRS-" = "Healthy"))
+
+# Need to change our new variables to factors to work in DESeq2
+DEM$DIAG_CRS <- as.factor(DEM$DIAG_CRS)
+#DEM$DIAG_CRS <- revalue(DEM$DIAG_CRS, c("CRS-"="Healthy", "CRS+"="CRS"))
+DEM$DIAG_CF <- as.factor(DEM$DIAG_CF)
+# Change Sample number to numeric
+
+# Multiple samples
+DEM_PROC2 <- DEM %>%
+  filter(SUBJECT_ID %in% multiSample) %>%
+  mutate(SAMPLE_NUMBER = "2") %>%
+  select(SUBJECT_ID, 
+         DATE_ENROLLED, 
+         SAMPLE_NUMBER,
+         SAMPLE_TYPE = SAMPLE_TYPE_2, 
+         DATE_OF_PROCEDURE = DATE_OF_PROCEDURE_2,
+         DOB, DEM_SEX, DIAG_CRS, DIAG_CF, DEM_COMMENTS, DEM_COMPLETE
+         )
+
+# pull out records to match sputum samples
+DEM_SPUTUM_1 <- DEM %>%
+  filter(PAIRED_SPUTUM_1 == "yes") %>%
+  mutate(SAMPLE_TYPE = "Sputum",
+         SAMPLE_NUMBER = "1") %>%
+  select(SUBJECT_ID, DATE_ENROLLED, SAMPLE_NUMBER, SAMPLE_TYPE,
+         DATE_OF_PROCEDURE = DATE_OF_PROCEDURE_1,
+         DOB, DEM_SEX, DIAG_CRS, DIAG_CF, DEM_COMMENTS, DEM_COMPLETE)
+
+DEM_SPUTUM_2 <- DEM %>%
+  filter(PAIRED_SPUTUM_2 == "yes") %>%
+  mutate(SAMPLE_TYPE = "Sputum",
+         SAMPLE_NUMBER = "2") %>%
+  select(SUBJECT_ID, DATE_ENROLLED, SAMPLE_NUMBER, SAMPLE_TYPE,
+         DATE_OF_PROCEDURE = DATE_OF_PROCEDURE_2,
+         DOB, DEM_SEX, DIAG_CRS, DIAG_CF, DEM_COMMENTS, DEM_COMPLETE)
+
+# Get values for sample 3009CYY
+DEM_9_CLINIC <- DEM %>%
+  filter(SUBJECT_ID == "9" & !is.na(DATE_OF_CLINIC_VISIT_2)) %>%
+  mutate(SAMPLE_TYPE = "Clinic",
+         SAMPLE_NUMBER = "1") %>%
+  select(SUBJECT_ID, DATE_ENROLLED, SAMPLE_NUMBER, SAMPLE_TYPE,
+         DATE_OF_PROCEDURE = DATE_OF_CLINIC_VISIT_2,
+         DOB, DEM_SEX, DIAG_CRS, DIAG_CF, DEM_COMMENTS, DEM_COMPLETE)
+
+
+# select variables in DEM to match DEM_MULTI
+DEM_PROC1 <- DEM %>%
+  mutate(SAMPLE_NUMBER = "1") %>%
+  select(SUBJECT_ID,
+         DATE_ENROLLED,
+         SAMPLE_NUMBER,
+         SAMPLE_TYPE = SAMPLE_TYPE_1,
+         DATE_OF_PROCEDURE = DATE_OF_PROCEDURE_1,
+         DOB, DEM_SEX, DIAG_CRS, DIAG_CF, DEM_COMMENTS, DEM_COMPLETE
+         )
+DEM_Multi_join <- bind_rows(DEM_PROC1, DEM_PROC2, DEM_SPUTUM_1, DEM_SPUTUM_2, DEM_9_CLINIC)
+DEM_Multi_join$SAMPLE_NUMBER <- as.numeric(DEM_Multi_join$SAMPLE_NUMBER)
+```
+
+# SNOT20
+DONE: Table for SNOT20 data
+```{r}
+SNOT20.filter <- "snot20"
+SNOT20 <- redcap_dates %>%
+  filter(redcap_repeat_instrument %in% SNOT20.filter,
+         !snot20_complete.factor == "Incomplete") %>%
+  select(subject_id:procedure_date_3,
+         SNOT20_COMPLETE=snot20_complete.factor,
+         SNOT20_COLLECTION_DATE = snot20_collection_date,
+         SNOT20_BLOW_NOSE = blow_nose,
+         SNOT20_SNEEZING = sneezing,
+         SNOT20_RUNNY_NOSE = runny_nose,
+         SNOT20_COUGH = cough,
+         SNOT20_POST_NASAL_DISCHARGE = post_nasal_discharge,
+         SNOT20_THICK_NASAL_DISCHARGE = thick_nasal_discharge,
+         SNOT20_EAR_FULLNESS = ear_fullness,
+         SNOT20_DIZZINESS = dizziness,
+         SNOT20_EAR_PAIN = ear_pain,
+         SNOT20_FACIAL_PAIN_PRESSURE = facial_pain_pressure,
+         SNOT20_DIFFICULTY_FALLING_ASLEEP = difficulty_falling_asleep,
+         SNOT20_WAKE_UP_AT_NIGHT = wake_up_at_night,
+         SNOT20_LACK_SLEEP = lack_sleep,
+         SNOT20_WAKE_TIRED = wake_tired,
+         SNOT20_FATIGUE = fatigue,
+         SNOT20_REDUCED_PRODUCTIVITY = reduced_productivity,
+         SNOT20_REDUCED_CONCETRATION = reduced_concentration,
+         SNOT20_FRUSTRATED_RESTLESS_IRRITABLE = frustrated_restless_irritable,
+         SNOT20_SAD = sad,
+         SNOT20_EMBARRASSED = embarrassed,
+         SNOT20_TOTAL = total,
+         # Top 5
+         TOP_5_BLOW_NOSE = blow_nose,
+         TOP_5_SNEEZING = sneezing,
+         TOP_5_RUNNY_NOSE = runny_nose,
+         TOP_5_COUGH = cough,
+         TOP_5_POST_NASAL_DISCHARGE = post_nasal_discharge,
+         TOP_5_THICK_NASAL_DISCHARGE = thick_nasal_discharge,
+         TOP_5_EAR_FULLNESS = ear_fullness,
+         TOP_5_DIZZINESS = dizziness,
+         TOP_5_EAR_PAIN = ear_pain,
+         TOP_5_FACIAL_PAIN_PRESSURE = facial_pain_pressure,
+         TOP_5_DIFFICULTY_FALLING_ASLEEP = difficulty_falling_asleep,
+         TOP_5_WAKE_UP_AT_NIGHT = wake_up_at_night,
+         TOP_5_LACK_SLEEP = lack_sleep,
+         TOP_5_WAKE_TIRED = wake_tired,
+         TOP_5_FATIGUE = fatigue,
+         TOP_5_REDUCED_PRODUCTIVITY = reduced_productivity,
+         TOP_5_REDUCED_CONCETRATION = reduced_concentration,
+         TOP_5_FRUSTRATED_RESTLESS_IRRITABLE = frustrated_restless_irritable,
+         TOP_5_SAD = sad,
+         TOP_5_EMBARRASSED = embarrassed) %>%
+    mutate(SNOT20_DATE_DIFFTIME_PROC1 = difftime(date_of_procedure, SNOT20_COLLECTION_DATE, units = "days"),
+           SNOT20_DATE_DIFFTIME_PROC2 = difftime(date_of_procedure_2, SNOT20_COLLECTION_DATE, units = "days"))
+
+# Fix double entry for subject 222 with surgery associated SNOT22 in position 2 repeat instance. 
+SNOT20 <- SNOT20 %>% filter(!subject_id == "222" | !SNOT20_COLLECTION_DATE == "2017-02-22") 
+SNOT20$redcap_repeat_instance <- as.numeric(SNOT20$redcap_repeat_instance)
+SNOT20[SNOT20$subject_id == "222", "redcap_repeat_instance"] <- 1 # Make the instance 1
+# Fix switched entries for subject 171 (2 is for the first sample, and 1 is for the second sample)
+SNOT20[SNOT20$subject_id == "171", "redcap_repeat_instance"] <- 1 # Make the instance 1
+SNOT20 <- SNOT20 %>% mutate(redcap_repeat_instance = ifelse(subject_id == "171" & SNOT20_COLLECTION_DATE == "2016-01-13", 2, redcap_repeat_instance)) %>%
+  select(subject_id:procedure_date_3,
+         SNOT20_DATE_DIFFTIME_PROC1,
+         SNOT20_DATE_DIFFTIME_PROC2,
+         everything())
+
+# Get all sample 1
+SNOT20_1 <- SNOT20 %>% 
+  filter(redcap_repeat_instance == 1,
+         !is.na(SNOT20_DATE_DIFFTIME_PROC1),
+         abs(SNOT20_DATE_DIFFTIME_PROC1) <= 180) %>%
+  select(subject_id,
+         DATE_OF_PROCEDURE = date_of_procedure,
+         SNOT20_DATE_DIFFTIME = SNOT20_DATE_DIFFTIME_PROC1,
+         SAMPLE_TYPE = sample_type_1,
+         SNOT20_COMPLETE:TOP_5_EMBARRASSED
+         )
+# Get all sample 2
+SNOT20_2 <- SNOT20 %>% 
+  filter(redcap_repeat_instance == 2,
+         !is.na(date_of_procedure_2),
+         !is.na(SNOT20_DATE_DIFFTIME_PROC2),
+         abs(SNOT20_DATE_DIFFTIME_PROC2) <= 180) %>%
+  select(subject_id,
+         DATE_OF_PROCEDURE = date_of_procedure_2,
+         SNOT20_DATE_DIFFTIME = SNOT20_DATE_DIFFTIME_PROC2,
+         SAMPLE_TYPE = sample_type_2,
+         SNOT20_COMPLETE:TOP_5_EMBARRASSED
+         )
+
+# Get all sputum sample 1
+SNOT20_1_SPUTUM <- SNOT20 %>% 
+  filter(redcap_repeat_instance == 1,
+         paired_sputum_yes_no_1 == "yes",
+         !is.na(SNOT20_DATE_DIFFTIME_PROC1),
+         abs(SNOT20_DATE_DIFFTIME_PROC1) <= 180) %>%
+  mutate(SAMPLE_TYPE = "Sputum") %>%
+  select(subject_id,
+         DATE_OF_PROCEDURE = date_of_procedure,
+         SNOT20_DATE_DIFFTIME = SNOT20_DATE_DIFFTIME_PROC1,
+         SAMPLE_TYPE,
+         SNOT20_COMPLETE:TOP_5_EMBARRASSED
+         )
+# Get all sputum sample 2 
+SNOT20_2_SPUTUM <- SNOT20 %>% 
+  filter(redcap_repeat_instance == 2,
+         paired_sputum_2 == "yes",
+         !is.na(date_of_procedure_2),
+         !is.na(SNOT20_DATE_DIFFTIME_PROC2),
+         abs(SNOT20_DATE_DIFFTIME_PROC2) <= 180) %>%
+  mutate(SAMPLE_TYPE = "Sputum") %>%
+  select(subject_id,
+         DATE_OF_PROCEDURE = date_of_procedure_2,
+         SNOT20_DATE_DIFFTIME = SNOT20_DATE_DIFFTIME_PROC2,
+         SAMPLE_TYPE,
+         SNOT20_COMPLETE:TOP_5_EMBARRASSED
+         )
+#(There are no fields that meet these requirements)
+
+# Bind tables together
+SNOT20_Multi <- dplyr::bind_rows(SNOT20_1, SNOT20_2, SNOT20_1_SPUTUM)
+```
+
+# Sinus Factors
+```{r}
+SINUS.FACTORS <- redcap_dates %>%
+  filter(is.na(redcap_repeat_instance)) %>% # sinus factor data is located on the first entry line for each patient
+  select(subject_id, #date_of_procedure,
+         SINUS_FACTORS_COMPLETE = sinus_related_factors_complete.factor,
+         SINUS_FACTORS_OTHER_COMMENT = other_sinus_related,
+         SINUS_FACTORS_ASTHMA = sinus_related_factors___1.factor,
+         SINUS_FACTORS_ALLERGIES = sinus_related_factors___2.factor,
+         SINUS_FACTORS_GERD = sinus_related_factors___3.factor,
+         SINUS_FACTORS_PRIORFESS = sinus_related_factors___4.factor,
+         SINUS_FACTORS_SUBSEQFESS = sinus_related_factors___5.factor,
+         SINUS_FACTORS_NUMFESS = number_previous_fess,
+         SINUS_FACTORS_POLYPS = sinus_related_factors___6.factor,
+         SINUS_FACTORS_POLYPOIDCHANGE = sinus_related_factors___7.factor,
+         SINUS_FACTORS_SMOKER = sinus_related_factors___8.factor,
+         SINUS_FACTORS_OTHER = sinus_related_factors___9.factor)
+```
+Dealing with multiple samples: there is only one entry per sample here. Don't bind by date.
+
+
+# Lab Cultures
+While we're definitely interested in all the lab cultures, we only want to keep the culture data associated with the actual sample, or closest entry within three months prior.
+```{r}
+culture.filter <- "clinical_lab_cultures"
+
+LABS <- redcap_dates %>%
+  filter(redcap_repeat_instrument %in% culture.filter) %>%
+  select(subject_id:clinic_date_2, 
+         LABS_DATE = culture_date,
+         LABS_SPECIMEN_TYPE = specimen_type_description.factor,
+         LABS_SPECIMEN_TYPE_OTHER = other_specimen_type,
+         LABS_SAMPLE_PURULENCE = purulence_of_sample.factor,
+         LABS_P_AERUGINOSA = culture.factor,
+         LABS_P_AERUGINOASA_GROWTH = pseudomonas_growth.factor,
+         LABS_P_AERUGINOASA_RESISTANCE = resistance_2.factor,
+         LABS_P_AERUGINOSA_RESISTANCE_TYPE = type_of_resistance_2,
+         LABS_P_AERUGINOSA_MUCOID = pseudomonas_aeruginosa_muc.factor,
+         LABS_P_AERUGINOSA_MUCOID_GROWTH = grow_pseudomonas_aeruginosa_muc.factor,
+         LABS_P_AERUGINOSA_MUCOID_RESISTANCE = resistance.factor,
+         LABS_P_AERUGINOSA_MUCOID_RESISTANCE_TYPE = type_of_resistance,
+         LABS_S_AUREUS = staph_aureus.factor,
+         LABS_S_AUREUS_GROWTH = staph_aureus_growth.factor,
+         LABS_S_AUREUS_RESISTANCE = resistance_3.factor,
+         LABS_S_AUREUS_RESISTANCE_TYPE = type_of_resistance_3,
+         LABS_COAG_NEG_STAPH = coag_negative_staph.factor,
+         LABS_COAG_NEG_STAPH_GROWTH = growth_coag_neg_staph.factor,
+         LABS_COAG_NEG_STAPH_RESISTANCE = resistance_4.factor,
+         LABS_COAG_NEG_STAPH_RESISTANCE_TYPE = type_of_resistance_4,
+         LABS_STREP_PNEUMO = strep_pneumo.factor,
+         LABS_STREP_PNEUMO_GROWTH = strep_pneumo_growth.factor,
+         LABS_STREP_PNEUMO_RESISTANCE = strep_pneumo_res.factor,
+         LABS_STREP_PNEUMO_RESISTANCE_TYPE = type_of_resistance_7,
+         LABS_OTHER_1 = other_culture_1,
+         LABS_OTHER_1_GROWTH = growth_other_culture_1.factor,
+         LABS_OTHER_1_RESISTANCE = resistance_5.factor,
+         LABS_OTHER_1_RESISTANCE_TYPE = type_of_resistance_5,
+         LABS_OTHER_2 = other_culture_2,
+         LABS_OTHER_2_GROWTH = growth_other_culture_2.factor,
+         LABS_OTHER_2_RESISTANCE = resistance_6.factor,
+         LABS_OTHER_2_RESISTANCE_TYPE = t_res_6,    
+         LABS_OTHER_3 = other_culture_3,
+         LABS_OTHER_3_GROWTH = growth_other_culture_3.factor,
+         LABS_OTHER_3_RESISTANCE = resistance_7.factor,
+         LABS_OTHER_3_RESISTANCE_TYPE = t_res_7,
+         LABS_COMMENTS = culture_comments,
+         LABS_COMPLETE = clinical_lab_cultures_complete.factor
+         ) %>%
+  # Make a variable called LABS_DATE_DIFFTIME that is the number of days: 
+  # Time 1 - Time 2 = difftime :: date_of_procedure - LABS_DATE
+  mutate(LABS_DATE_DIFFTIME_PROC1 = difftime(date_of_procedure, LABS_DATE, units = "days"),
+         LABS_DATE_DIFFTIME_PROC2 = difftime(date_of_procedure_2, LABS_DATE, units = "days")) %>%
+  select(subject_id:LABS_DATE, LABS_COMPLETE, LABS_DATE_DIFFTIME_PROC1, LABS_DATE_DIFFTIME_PROC2, everything()) #%>%
+  # Filter out any cultures from sputum sample types
+#  filter(!LABS_SPECIMEN_TYPE == "Sputum") %>%
+#  filter(!grepl("Throat|Bronchial lavage|CF", LABS_SPECIMEN_TYPE_OTHER, ignore.case = TRUE))
+
+# Now I'd like to only keep culture records that are within 90 days of the procedure date.
+LABS_90DAYS_PROC1_NOSPUTUM <- LABS %>%
+  group_by(subject_id) %>%
+  filter(abs(LABS_DATE_DIFFTIME_PROC1) <= 90,
+         !LABS_SPECIMEN_TYPE == "Sputum") %>%
+  arrange(abs(LABS_DATE_DIFFTIME_PROC1)) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(SAMPLE_NUMBER = 1) %>%
+  select(subject_id, DATE_OF_PROCEDURE = date_of_procedure, SAMPLE_TYPE = sample_type_1, SAMPLE_NUMBER,
+         LABS_COMPLETE, LABS_DATE_DIFFTIME = LABS_DATE_DIFFTIME_PROC1, LABS_SPECIMEN_TYPE,
+         LABS_SPECIMEN_TYPE_OTHER, LABS_SAMPLE_PURULENCE:LABS_COMMENTS)
+
+LABS_90DAYS_PROC2_NOSPUTUM <- LABS %>%
+  group_by(subject_id) %>%
+  filter(abs(LABS_DATE_DIFFTIME_PROC2) <= 90,
+         !LABS_SPECIMEN_TYPE == "Sputum") %>%
+  arrange(abs(LABS_DATE_DIFFTIME_PROC2)) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(SAMPLE_NUMBER = 2) %>%
+  select(subject_id, DATE_OF_PROCEDURE = date_of_procedure_2, SAMPLE_TYPE = sample_type_2, SAMPLE_NUMBER,
+         LABS_COMPLETE, LABS_DATE_DIFFTIME = LABS_DATE_DIFFTIME_PROC2, LABS_SPECIMEN_TYPE,
+         LABS_SPECIMEN_TYPE_OTHER, LABS_SAMPLE_PURULENCE:LABS_COMMENTS)
+
+LABS_90DAYS_PROC1_SPUTUM <- LABS %>%
+  group_by(subject_id) %>%
+  filter(abs(LABS_DATE_DIFFTIME_PROC1) <= 90,
+         LABS_SPECIMEN_TYPE == "Sputum") %>%
+  arrange(abs(LABS_DATE_DIFFTIME_PROC1)) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(SAMPLE_NUMBER = 1,
+         SAMPLE_TYPE = "Sputum") %>%
+  select(subject_id, DATE_OF_PROCEDURE = date_of_procedure, SAMPLE_TYPE, SAMPLE_NUMBER,
+         LABS_COMPLETE, LABS_DATE_DIFFTIME = LABS_DATE_DIFFTIME_PROC1, LABS_SPECIMEN_TYPE,
+         LABS_SPECIMEN_TYPE_OTHER, LABS_SAMPLE_PURULENCE:LABS_COMMENTS)
+
+LABS_90DAYS_PROC2_SPUTUM <- LABS %>%
+  group_by(subject_id) %>%
+  filter(abs(LABS_DATE_DIFFTIME_PROC2) <= 90,
+         LABS_SPECIMEN_TYPE == "Sputum") %>%
+  arrange(abs(LABS_DATE_DIFFTIME_PROC2)) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(SAMPLE_NUMBER = 2,
+         SAMPLE_TYPE = "Sputum") %>%
+  select(subject_id, DATE_OF_PROCEDURE = date_of_procedure_2, SAMPLE_TYPE, SAMPLE_NUMBER,
+         LABS_COMPLETE, LABS_DATE_DIFFTIME = LABS_DATE_DIFFTIME_PROC2, LABS_SPECIMEN_TYPE,
+         LABS_SPECIMEN_TYPE_OTHER, LABS_SAMPLE_PURULENCE:LABS_COMMENTS)
+
+LABS_Multi <- bind_rows(LABS_90DAYS_PROC1_NOSPUTUM, LABS_90DAYS_PROC2_NOSPUTUM, LABS_90DAYS_PROC1_SPUTUM, LABS_90DAYS_PROC2_SPUTUM)
+
+# There are lab data that don't have a date, but aren't NA in the LABS fields. ID those here. Get rid of any "Incomplete" entries.
+LABS_NA_DATE <- filter(LABS, is.na(LABS_DATE))
+# Which of these subjects is NOT already in the LABS_Multi, Make a dataframe for sample 1
+LABS_NA_DATE_ANTI_PROC1 <- anti_join(LABS_NA_DATE, LABS_Multi, by = "subject_id") %>%
+  filter(!LABS_COMPLETE == "Incomplete") %>%
+  mutate(SAMPLE_NUMBER = 1) %>%
+  select(subject_id, DATE_OF_PROCEDURE = date_of_procedure, SAMPLE_TYPE = sample_type_1, SAMPLE_NUMBER,
+         LABS_COMPLETE, LABS_DATE_DIFFTIME = LABS_DATE_DIFFTIME_PROC1, LABS_SPECIMEN_TYPE,
+         LABS_SPECIMEN_TYPE_OTHER, LABS_SAMPLE_PURULENCE:LABS_COMMENTS)
+# Which of these subjects is NOT already in the LABS_Multi, Make a dataframe for sample 2 if sample 2 exists for that subject
+LABS_NA_DATE_ANTI_PROC2 <- anti_join(LABS_NA_DATE, LABS_Multi, by = "subject_id") %>%
+  filter(!LABS_COMPLETE == "Incomplete",
+         !is.na(date_of_procedure_2)) %>%
+  mutate(SAMPLE_NUMBER = 2) %>%
+  select(subject_id, DATE_OF_PROCEDURE = date_of_procedure_2, SAMPLE_TYPE = sample_type_2, SAMPLE_NUMBER,
+         LABS_COMPLETE, LABS_DATE_DIFFTIME = LABS_DATE_DIFFTIME_PROC2, LABS_SPECIMEN_TYPE,
+         LABS_SPECIMEN_TYPE_OTHER, LABS_SAMPLE_PURULENCE:LABS_COMMENTS)
+# Which of these subjects is NOT already in the LABS_Multi, Make a dataframe for a sputum sample if one exists (Only 1)
+LABS_NA_DATE_ANTI_SPUTUM <- anti_join(LABS_NA_DATE, LABS_Multi, by = "subject_id") %>%
+  filter(!LABS_COMPLETE == "Incomplete",
+         paired_sputum_yes_no_1 == "yes") %>%
+  mutate(SAMPLE_NUMBER = 1,
+         SAMPLE_TYPE = "Sputum") %>%
+  select(subject_id, DATE_OF_PROCEDURE = date_of_procedure, SAMPLE_TYPE, SAMPLE_NUMBER,
+         LABS_COMPLETE, LABS_DATE_DIFFTIME = LABS_DATE_DIFFTIME_PROC2, LABS_SPECIMEN_TYPE,
+         LABS_SPECIMEN_TYPE_OTHER, LABS_SAMPLE_PURULENCE:LABS_COMMENTS)
+
+LABS_3009CYY <- LABS_NA_DATE %>%
+  filter(subject_id == 9) %>%
+  mutate(SAMPLE_NUMBER = 1,
+         SAMPLE_TYPE = "Clinic") %>%
+  select(subject_id, DATE_OF_PROCEDURE = clinic_date_2, SAMPLE_TYPE, SAMPLE_NUMBER,
+         LABS_COMPLETE, LABS_DATE_DIFFTIME = LABS_DATE_DIFFTIME_PROC2, LABS_SPECIMEN_TYPE,
+         LABS_SPECIMEN_TYPE_OTHER, LABS_SAMPLE_PURULENCE:LABS_COMMENTS)
+
+LABS_Multi_NA_DATE <- bind_rows(LABS_Multi, LABS_NA_DATE_ANTI_PROC1, LABS_NA_DATE_ANTI_PROC2, LABS_NA_DATE_ANTI_SPUTUM, LABS_3009CYY)
+```
+
+# Medications
+```{r}
+# Filtering variables
+abx.filter <- "antibiotic_treatments"
+meds.notes.filter <- "Delete this form."
+
+MEDS <- redcap_dates %>%
+  filter(redcap_repeat_instrument %in% abx.filter) %>%
+  select(subject_id:clinic_date_2,
+         MEDS_TYPE = medication_type.factor,
+         MEDS_DATE_SURG = med_date_surg.factor,
+         # Azithromycin
+         MEDS_ABX_BIN_AZITHROMYCIN = antibiotic___1, MEDS_ABX_AZITHROMYCIN_ROUTE = azithromycin_route.factor,
+         # Cayston
+         MEDS_ABX_BIN_CAYSTON = antibiotic___2, MEDS_ABX_CAYSTON_ROUTE = cayston_route.factor,
+         # Colistin
+         MEDS_ABX_BIN_COLISTIN = antibiotic___3, MEDS_ABX_COLISTIN_ROUTE = colistin_route.factor,
+         # Tobramycin - got rid of the general MEDS_ABX_TOB because it's redundant with the ROUTE columns
+#         MEDS_ABX_TOBRAMYCIN = antibiotic___4, 
+         MEDS_ABX_BIN_TOBRAMYCIN_ROUTE_ORAL = tobramycin_route___1,
+         MEDS_ABX_BIN_TOBRAMYCIN_ROUTE_IRRIGATION = tobramycin_route___2,
+         MEDS_ABX_BIN_TOBRAMYCIN_ROUTE_INHALATION = tobramycin_route___3,
+         MEDS_ABX_BIN_TOBRAMYCIN_ROUTE_IV = tobramycin_route___4,
+         MEDS_ABX_BIN_TOBRAMYCIN_ROUTE_TOPICAL = tobramycin_route___5,
+         # Doxycycline
+         MEDS_ABX_BIN_DOXYCYCLINE = antibiotic___6, MEDS_ABX_DOXYCYCLINE_ROUTE = doxycycline_route.factor,
+         # Gentamicin
+         MEDS_ABX_BIN_GENTAMICIN = antibiotic___7, MEDS_ABX_GENTAMICIN_ROUTE = gentamicin_route.factor,
+         # Levofloxacin
+         MEDS_ABX_BIN_LEVOFLOXACIN = antibiotic___8, MEDS_ABX_LEVOFLOXACIN_ROUTE = levofloxacin_route.factor,
+         # Clarithromycin
+         MEDS_ABX_BIN_CLARITHROMYCIN = antibiotic___9, MEDS_ABX_CLARITHROMYCIN_ROUTE = clarithromycin_route.factor,
+         # Ciprofloxacin
+         MEDS_ABX_BIN_CIPROFLOXACIN = antibiotic___10, MEDS_ABX_CIPROFLOXACIN_ROUTE = ciprofloxacin_route.factor,
+         # Meropenem
+         MEDS_ABX_BIN_MEROPENEM = antibiotic___11,
+         MEDS_ABX_BIN_MEROPENEM_ROUTE_ORAL = meropenem_route___1,
+         MEDS_ABX_BIN_MEROPENEM_ROUTE_IRRIGATION = meropenem_route___2,
+         MEDS_ABX_BIN_MEROPENEM_ROUTE_INHALATION = meropenem_route___3,
+         MEDS_ABX_BIN_MEROPENEM_ROUTE_IV = meropenem_route___4,
+         MEDS_ABX_BIN_MEROPENEM_ROUTE_TOPICAL = meropenem_route___5,
+         # Zosyn
+         MEDS_ABX_BIN_ZOSYN = antibiotic___12, MEDS_ABX_ZOSYN_ROUTE = zosyn_route,
+         # Bactrim
+         MEDS_ABX_BIN_BACTRIM = antibiotic___13, MEDS_ABX_BACTRIM_ROUTE = bactrim_route,
+         # Augmentin
+         MEDS_ABX_BIN_AUGMENTIN = antibiotic___14, MEDS_ABX_AUGMENTIN_ROUTE = augmentin_route,
+         # Bacitracin
+         MEDS_ABX_BIN_BACITRACIN = antibiotic___15, MEDS_ABX_BACITRACIN_ROUTE = bacitracin_route,
+         # Cefdinir
+         MEDS_ABX_BIN_CEFDINIR = antibiotic___16, MEDS_ABX_CEFDINIR_ROUTE = cefdinir_route,
+         # Dicloxacillin
+         MEDS_ABX_BIN_DICLOXACILLIN = antibiotic___17, MEDS_ABX_DICLOXACILLIN_ROUTE = dicloxacillin_route,
+         # Clindamycin
+         MEDS_ABX_BIN_CLINDAMYCIN = antibiotic___19, MEDS_ABX_CLINDAMYCIN_ROUTE = clindamycin_route,
+         # Colymycin
+         MEDS_ABX_BIN_COLYMYCIN = antibiotic___20, MEDS_ABX_COLYMYCIN_ROUTE = colymycin_route,
+         # Other abx
+         MEDS_ABX_OTHER_BIN = antibiotic___18,  
+         MEDS_ABX_OTHER = antibiotic_other, 
+         MEDS_ABX_OTHER_ROUTE = antibiotic_other_route,
+         # Oral steroids
+         MEDS_ORAL_STEROID_PREDNISONE = oral_steroid___1,
+         MEDS_ORAL_STEROID_METHYLPREDNISOLONE = oral_steroid___2,
+         MEDS_ORAL_STEROID_OTHER_BIN = oral_steroid___3,
+         MEDS_ORAL_STEROID_OTHER = other_oral_steroid,
+         # Steroid nasal spray
+         MEDS_SPRAY_STEROID_FLUTICASONE = steroid_nasal_spray___1,
+         MEDS_SPRAY_STEROID_OTHER_BIN = steroid_nasal_spray___2,
+         MEDS_SPRAY_STEROID_OTHER = other_steroid_nasal_spray,
+         # Other Meds
+         MEDS_HYPERTONIC_SALINE = other_medications___1,
+         MEDS_STEROID_IRRIGATION = other_medications___2,
+         MEDS_INHALED_STEROID = other_medications___3,
+         # Notes
+         MEDS_NOTES = notes,
+         MEDS_COMPLETE = antibiotic_treatments_complete.factor
+  )  %>%
+  # Taking care of common antibiotics found in the "Other" category, or antibiotics in the "Other" category that should have been coded in.
+        # Many cases of mupirocin in the "other" category, so making a new column for these to be easily counted. Mupirocin is always topical.
+  mutate(MEDS_ABX_BIN_MUPIROCIN = ifelse(grepl("Mupirocin", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_VANCOMYCIN = ifelse(grepl("Vancomycin", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_IMIPENEM = ifelse(grepl("Imipenem", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_UNASYN = ifelse(grepl("unasyn", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_AZTREONAM = ifelse(grepl("Aztreonam", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_MOXIFLOXACIN = ifelse(grepl("Moxifloxacin", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_OFLOXACIN = ifelse(grepl("ofloxacin", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_LINEZOLID = ifelse(grepl("Linezolid", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_VANCOMYCIN = ifelse(grepl("Vancomycin", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_HIPREX = ifelse(grepl("methenamine", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0), #"methenamine hippurate" in Other category
+         MEDS_ABX_BIN_CEFUROXIME = ifelse(grepl("cefuroxime", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_CEFTRIAXONE = ifelse(grepl("ceftriaxone", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_CEFPROZIL = ifelse(grepl("cefprozil", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_AMOXICILLIN = ifelse(grepl("amoxicillin", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_CEFAZOLIN = ifelse(grepl("cefazolin", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_CEDFALEXIN = ifelse(grepl("keflex", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_MICAFUNGIN = ifelse(grepl("micafungin", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_CEFTAZADIME = ifelse(grepl("CefTAZidime", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_METRONIDIZOLE = ifelse(grepl("Metronidazole", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_CEFADROXIL = ifelse(grepl("cefadroxil", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_SULFATRIM = ifelse(grepl("Sulfamethoxazole", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_ETHAMBUTOL = ifelse(grepl("ethambutol", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_PIPERACILLIN = ifelse(grepl("piperacillin", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0),
+         MEDS_ABX_BIN_PENICILLIN = ifelse(grepl("Penicillin", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 0)
+         ) %>%
+        # There is a case of bactrim in the "Other" category - adding it to the Bactrim column
+  mutate(MEDS_ABX_BIN_BACTRIM = ifelse(grepl("Bactrim", MEDS_ABX_OTHER, ignore.case = TRUE), 1,
+                                   ifelse(MEDS_ABX_BIN_BACTRIM == "1", 1, 0))) %>%
+        # There is one case of a tobramycin instance in the "Other" category - Adding it to the ROUTE_ORAL column.
+  mutate(MEDS_ABX_BIN_TOBRAMYCIN_ROUTE_ORAL = ifelse(grepl("Tobramycin", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 
+                                                 ifelse(MEDS_ABX_BIN_TOBRAMYCIN_ROUTE_ORAL == "1", 1, 0))) %>%
+        # There are a few cases of colymycin being mentioned in the notes, but not coded in the table. fixing that here, not adjusting route notes:
+  mutate(MEDS_ABX_BIN_COLYMYCIN = ifelse(grepl("COLYMYCIN", MEDS_ABX_OTHER, ignore.case = TRUE), 1, 
+                                                 ifelse(MEDS_ABX_BIN_COLYMYCIN == "1", 1, 0))) %>%
+  # Taking the multiple route columns and condensing into one. All cases of meropenem only have one route per instance
+  mutate(MEDS_ABX_MEROPENEM_ROUTE = ifelse(MEDS_ABX_BIN_MEROPENEM_ROUTE_ORAL == "1", "Oral",
+                                            ifelse(MEDS_ABX_BIN_MEROPENEM_ROUTE_IRRIGATION == "1", "Irrigation",
+                                                   ifelse(MEDS_ABX_BIN_MEROPENEM_ROUTE_INHALATION == "1", "Inhalation",
+                                                        ifelse(MEDS_ABX_BIN_MEROPENEM_ROUTE_IV == "1", "Intravenous",
+                                                                ifelse(MEDS_ABX_BIN_MEROPENEM_ROUTE_TOPICAL == "1", "Topical", NA)))))) %>%
+  # Taking care of common steroids found in the "Other" category
+  mutate(MEDS_SPRAY_STEROID_MOMETASONE = ifelse(grepl("Mometasone", MEDS_SPRAY_STEROID_OTHER, ignore.case = TRUE), 1, 0)) %>%
+  mutate(MEDS_SPRAY_STEROID_BUDESONIDE = ifelse(grepl("Budesonide", MEDS_SPRAY_STEROID_OTHER, ignore.case = TRUE), 1, 0)) %>%
+
+  # Selecting and organizing
+  #select(-contains("MEDS_ABX_MEROPENEM_ROUTE_")) %>%
+  #select(sort(current_vars())) %>%
+  select(subject_id:clinic_date_2, MEDS_TYPE, MEDS_DATE_SURG, MEDS_NOTES, MEDS_COMPLETE, 
+         contains("ABX_OTHER"), contains("ABX_BIN"), contains("STEROID"), contains("ROUTE"), everything()) %>%
+  # There is one case of a field having notes to remove. So removing it.
+  filter(!MEDS_NOTES %in% meds.notes.filter)
+
+MEDS_FILT <- MEDS %>%
+  filter(!is.na(MEDS_DATE_SURG)) %>%
+  filter(MEDS_COMPLETE == "Complete")
+
+# Separate out samples
+
+CRS_SAMPLES <- c("9","21","36","38","47","51","115","130","131","133","169","171")
+
+MEDS_SINUS_DATA <- MEDS %>%
+  filter(subject_id %in% CRS_SAMPLES) %>%
+  select(subject_id:clinic_date_2, MEDS_NOTES, MEDS_DATE_SURG, MEDS_TYPE, MEDS_COMPLETE, contains("ABX_BIN"))
+
+
+
+# What to do about 131, 171. 
+# ** 171 only has second sample, because first instance belongs to first sample, which is actually a clinic sample. Second instance is for the first FESS surgery
+# ** 131 has two FESS samples, one sputum sample with first FESS sample. First abx entry has no med_date_surg, or meds_type, but entry is complete
+# second entry has entry for three days prior to surgery, but no reference to which surgery. 
+# Third entry is within 3 months of surgery, likely the last surgery, but no reference to surgery date.
+# Answer: 
+  # Make the assumption that the second entry for 131 matches the first sample 
+  # Make the assumption that the third entry for 131 is for the second sample 
+  # Match 171 first entry to clinic ("2") sample. Match second entry to first FESS sample
+
+MEDS_SAMPLE_131 <- MEDS %>%
+  filter(subject_id == "131", !is.na(MEDS_TYPE)) %>%
+  mutate(SAMPLE_NUMBER = ifelse(redcap_repeat_instance == 2, 1, 2)) %>%
+  select(subject_id, SAMPLE_NUMBER, contains("MEDS"))
+
+MEDS_SAMPLE_171 <- MEDS %>%
+  filter(subject_id == "171") %>%
+  mutate(SAMPLE_NUMBER = ifelse(redcap_repeat_instance == 2, 1, 2)) %>%
+  select(subject_id, SAMPLE_NUMBER, contains("MEDS"))
+
+MEDS_SAMPLE_1 <- MEDS_FILT %>%
+  filter(is.na(date_of_procedure_2)) %>%
+  mutate(SAMPLE_NUMBER = 1) %>%
+  select(subject_id, SAMPLE_NUMBER, contains("MEDS"))
+
+MEDS_SAMPLE_2 <- MEDS_FILT %>%
+  filter(!is.na(date_of_procedure_2),
+         !redcap_repeat_instance == "1",
+         !subject_id %in% c("11","131","171")) %>%
+  mutate(SAMPLE_NUMBER = 2) %>%
+  select(subject_id, SAMPLE_NUMBER, contains("MEDS"))
+
+MEDS_11 <- MEDS_FILT %>%
+  filter(subject_id == "11") %>%
+  mutate(SAMPLE_NUMBER = ifelse(redcap_repeat_instance == "2", 1, 2)) %>%
+  select(subject_id, SAMPLE_NUMBER, contains("MEDS"))
+
+MEDS_MULTI <- bind_rows(MEDS_SAMPLE_1, MEDS_SAMPLE_2, MEDS_11, MEDS_SAMPLE_131, MEDS_SAMPLE_171)
+
+```
+
+# PFTs
+Table for PFTs (Mostly relevent for CF dataset)
+```{r}
+pft.filter <- "pulmonary_function_tests"
+PFT <- redcap_dates %>%
+  group_by(subject_id) %>%
+  fill(cf_crs_status) %>%
+  filter(cf_crs_status == "1", # Keep only CF CRS samples
+         redcap_repeat_instrument %in% pft.filter,
+         !pulmonary_function_tests_complete.factor == "Incomplete") %>%
+  select(subject_id:procedure_date_3, cf_crs_status, 
+         PFT_DATE = pft_date,
+         PFT_FVC_PREDICTED = fvc,
+         PTF_FVC_MEASURED = fvc_measured,
+         PFT_FVC_PERCENT = fvc_percent,
+         PFT_FEV1_PREDICTED = fev1,
+         PFT_FEV1_MEASURED = fev1_predicted,
+         PFT_FEV1_PERCENT = fev1_percent,
+         PFT_FEV1_FVC_PERCENT_PREDICTED = fev1_fvc,
+         PFT_FEV1_FVC_PERCENT_MEASURED = fev1_fvc_measured,
+         PFT_FEV1_FEV6_PERC_PREDICTED = fev1_fe6,
+         PFT_FEV1_FEV6_PERC_MEASURED = fev1_fev6_predicted,
+         PFT_FEF_MAX_PREDICTED = fef_max_predicted,
+         PFT_FEF_MAX_PERCENT = fef_max_percent,
+         PFT_FEF_25_75_PREDICTED = fef_25_75_predicted,
+         PFT_FEF_25_75_MEASURED = fef_25_75_l_sec_measured,
+         PFT_FEF_25_75_PERCENT = fef_25_75_percent,
+         PFT_FIF_MAX_PREDICTED = fif_max_predicted,
+         PFT_FIF_MAX_MEASURED = fif_max_l_sec_measured_act,
+         PFT_FIF_MAX_PERCENT = fif_max_l_sec_predicted,
+         PFT_EXPIRATORY_TIME_SEC = expiratory_time_sec,
+         PFT_COMPLETE = pulmonary_function_tests_complete.factor) %>%
+  # Make a variable called PFT_DATE_DIFFTIME that is the number of days: 
+  # Time 1 - Time 2 = difftime :: date_of_procedure - LABS_DATE
+  mutate(PFT_DATE_DIFFTIME_PROC1 = difftime(date_of_procedure, PFT_DATE, units = "days"),
+         PFT_DATE_DIFFTIME_PROC2 = difftime(date_of_procedure_2, PFT_DATE, units = "days"))
+
+# Now I'd like to only keep culture records that are within 6 months of the procedure date.
+PFT_90DAYS_PROC1_NOSPUTUM <- PFT %>%
+  group_by(subject_id) %>%
+  filter(abs(PFT_DATE_DIFFTIME_PROC1) <= 180) %>%
+  arrange(abs(PFT_DATE_DIFFTIME_PROC1)) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(SAMPLE_NUMBER = 1) %>%
+  select(subject_id, DATE_OF_PROCEDURE = date_of_procedure, 
+         SAMPLE_TYPE = sample_type_1, SAMPLE_NUMBER, PFT_COMPLETE,
+         PFT_DATE_DIFFTIME = PFT_DATE_DIFFTIME_PROC1, 
+         PFT_DATE:PFT_EXPIRATORY_TIME_SEC)
+
+PFT_90DAYS_PROC2_NOSPUTUM <- PFT %>%
+  group_by(subject_id) %>%
+  filter(abs(PFT_DATE_DIFFTIME_PROC2) <= 180) %>%
+  arrange(abs(PFT_DATE_DIFFTIME_PROC2)) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(SAMPLE_NUMBER = 2) %>%
+  select(subject_id, DATE_OF_PROCEDURE = date_of_procedure_2, 
+         SAMPLE_TYPE = sample_type_2, SAMPLE_NUMBER, PFT_COMPLETE,
+         PFT_DATE_DIFFTIME = PFT_DATE_DIFFTIME_PROC2, 
+         PFT_DATE:PFT_EXPIRATORY_TIME_SEC)
+
+
+PFT_90DAYS_PROC1_SPUTUM <- PFT %>%
+  group_by(subject_id) %>%
+  filter(abs(PFT_DATE_DIFFTIME_PROC1) <= 180,
+         paired_sputum_yes_no_1 == "yes") %>%
+  arrange(abs(PFT_DATE_DIFFTIME_PROC1)) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(SAMPLE_NUMBER = 1,
+         SAMPLE_TYPE = "Sputum") %>%
+  select(subject_id, DATE_OF_PROCEDURE = date_of_procedure, 
+         SAMPLE_TYPE, SAMPLE_NUMBER, PFT_COMPLETE,
+         PFT_DATE_DIFFTIME = PFT_DATE_DIFFTIME_PROC2, 
+         PFT_DATE:PFT_EXPIRATORY_TIME_SEC)
+
+PFT_90DAYS_PROC2_SPUTUM <- PFT %>%
+  group_by(subject_id) %>%
+  filter(abs(PFT_DATE_DIFFTIME_PROC2) <= 180,
+         paired_sputum_2 == "yes") %>%
+  arrange(abs(PFT_DATE_DIFFTIME_PROC2)) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(SAMPLE_NUMBER = 2,
+         SAMPLE_TYPE = "Sputum") %>%
+  select(subject_id, DATE_OF_PROCEDURE = date_of_procedure_2, 
+         SAMPLE_TYPE, SAMPLE_NUMBER, PFT_COMPLETE,
+         PFT_DATE_DIFFTIME = PFT_DATE_DIFFTIME_PROC2, 
+         PFT_DATE:PFT_EXPIRATORY_TIME_SEC)
+PFT_Multi <- bind_rows(PFT_90DAYS_PROC1_NOSPUTUM, PFT_90DAYS_PROC1_SPUTUM, PFT_90DAYS_PROC2_NOSPUTUM, PFT_90DAYS_PROC2_SPUTUM)
+```
+
+# CF Mutation
+```{r}
+CF_MUTATION <- redcap_dates %>%
+  # CF mutations are found on the first line of each new subject ID. Those lines are 
+  filter(is.na(redcap_repeat_instance),
+         cf_crs_status == "1") %>% 
+  select(subject_id, cf_crs_status.factor, contains("mutation")) %>%
+  mutate(MUT1_dF508 = ifelse(cf_mutation_type_1___1 == "1", "dF508", ""),
+         MUT1_G551D = ifelse(cf_mutation_type_1___2 == "1", "G551D", ""),
+         MUT1_G542X = ifelse(cf_mutation_type_1___3 == "1", "G542X", ""),
+         MUT1_W1282X = ifelse(cf_mutation_type_1___4 == "1", "W1282X", ""),
+         MUT1_N1303K = ifelse(cf_mutation_type_1___5 == "1", "N1303K", ""),
+         MUT1_R553X = ifelse(cf_mutation_type_1___6 == "1", "R553X", ""),
+         MUT1_R117H = ifelse(cf_mutation_type_1___7 == "1", "R117H", ""),
+         MUT1_Other = ifelse(cf_mutation_type_1___8 == "1", other_mutation_1, ""),
+         MUT2_dF508 = ifelse(cf_mutation_type_2___1 == "1", "dF508", ""),
+         MUT2_G551D = ifelse(cf_mutation_type_2___2 == "1", "G551D", ""),
+         MUT2_G542X = ifelse(cf_mutation_type_2___3 == "1", "G542X", ""),
+         MUT2_W1282X = ifelse(cf_mutation_type_2___4 == "1", "W1282X", ""),
+         MUT2_N1303K = ifelse(cf_mutation_type_2___5 == "1", "N1303K", ""),
+         MUT2_R553X = ifelse(cf_mutation_type_2___6 == "1", "R553X", ""),
+         MUT2_R117H = ifelse(cf_mutation_type_2___7 == "1", "R117H", ""),
+         MUT2_Other = ifelse(cf_mutation_type_2___8 == "1", other_mutation_2, "")) %>%
+  unite(col = MUT1, MUT1_dF508:MUT1_Other, sep = "", na.rm = TRUE) %>%
+  unite(col = MUT2, MUT2_dF508:MUT2_Other, sep = "", na.rm = TRUE) %>%
+  mutate(MUT1 = na_if(MUT1, ""),
+         MUT2 = na_if(MUT2, "")) %>%
+  mutate(HOMO_dF508 = ifelse(grepl("dF508", MUT1) & grepl("dF508", MUT2), TRUE, FALSE)) %>%
+  mutate(HOMO_dF508 = ifelse(!is.na(MUT2), HOMO_dF508, NA)) %>%
+  select(subject_id, CF_MUTATION_COMPLETE = cf_mutation_complete.factor, 
+         MUT1, MUT2, HOMO_dF508)
+```
+
+
+CT Scores
+```{r}
+CT_SCORES <- redcap_dates %>%
+  filter(is.na(redcap_repeat_instrument)) %>%
+  select(subject_id,date_of_procedure, left_frontal_sinus:ct_lundmckay_score_boyer_complete, ct_goss_complete.factor, ct_goss_boyer_complete.factor, ct_lundmckay_score_complete.factor, ct_lundmckay_score_boyer_complete.factor)
+colnames(CT_SCORES)
+
+#Lund-Mackay scores
+CT_SCORES_TOTALS <- CT_SCORES %>%
+  select(subject_id, date_of_procedure, 
+         CT_TOTAL_GOSS_PK = total_goss,
+         CT_GOSS_COMPLETE_PK = ct_goss_complete.factor,
+         CT_TOTAL_GOSS_HB = total_goss_hb, 
+         CT_GOSS_COMPLETE_HB = ct_goss_boyer_complete.factor,
+         CT_TOTAL_LMS_PK = total_lms, 
+         CT_LMS_COMPLETE_PK = ct_lundmckay_score_complete.factor,
+         CT_TOTAL_LMS_HB = total_lms_hb, 
+         CT_LMS_COMPLETE_HB = ct_lundmckay_score_boyer_complete.factor)
+```
+
+NOW: I'd like to combine labdata with the subsets of clinical data for use in further analysis in phyloseq. I am first assuming that there is one record for each redcap entry. But I'm going to join these tables by two criteria, RedCap number and procedure date, just to be sure that data is going to be added to first samples only.Filter down samples in data table to just those that have been identified as "use in study", then filter out second samples, and CF + samples.
+
+# Combining tables together by procedure date and sample id
+Data loading
+```{r}
+labseq <- read_csv("./CRS_WORKBOOK_MASTER_NOV2019.csv")
+```
+
+1) subset the labseq dataframe so it only includes samples that are:
+```{r}
+# Define sample types to ignore samples that came from clinic (for now)
+CFCRS_type <- c("FESS","Sputum", "Clinic")
+
+# CF-CRS Dataset
+labseq_CFCRS <- labseq %>%
+  filter(SAMPLE_TYPE %in% CFCRS_type) %>%
+  filter(grepl("CF-CRS", PROJECT, ignore.case = TRUE)) %>%
+  filter(!is.na(SEQ_RUN_NUM))  %>%
+  filter(!grepl(("sample not collected|sample missing"), LAB_COLLECTION_NOTES, ignore.case = TRUE))
+labseq_CFCRS$SAMPLE_NUMBER <- as.numeric(labseq_CFCRS$SAMPLE_NUMBER)
+
+# Separate out sample types
+labseq_CFCRS_FESS <- filter(labseq_CFCRS, SAMPLE_TYPE == "FESS")
+labseq_CFCRS_Sputum <- filter(labseq_CFCRS, SAMPLE_TYPE == "Sputum")
+labseq_CFCRS_Clinic <- filter(labseq_CFCRS, SAMPLE_TYPE == "Clinic")
+
+
+# Seq Controls (to be combined back with each dataset at the end of joining, prior to decontam analysis)
+labseq_CRS_controls <- labseq %>%
+  filter(SAMPLE_OR_CONTROL == "control" &
+        USE_IN_CRS_FESS_STUDY == 1) %>%
+  select(subject_id, DATE_OF_PROCEDURE, SAMPLE_NAME, SAMPLE_TYPE, SAMPLE_OR_CONTROL, SEQ_RUN_NAME_SHORT)
+```
+
+2) Combine FESS data with other datasets. Matching sample 1 with instance 1, etc.
+```{r}
+samdf_CFCRS <- labseq_CFCRS %>%
+  left_join(DEM_Multi_join, by = c("subject_id" = "SUBJECT_ID", "SAMPLE_NUMBER","DATE_OF_PROCEDURE", "SAMPLE_TYPE")) %>%
+  left_join(CF_MUTATION, by = "subject_id") %>%
+  left_join(SINUS.FACTORS, by = c("subject_id")) %>%
+  left_join(SNOT20_Multi, by = c("subject_id", "DATE_OF_PROCEDURE","SAMPLE_TYPE")) %>%
+  left_join(LABS_Multi_NA_DATE, by = c("subject_id", "DATE_OF_PROCEDURE","SAMPLE_TYPE","SAMPLE_NUMBER")) %>%
+  left_join(MEDS_MULTI, by = c("subject_id", "SAMPLE_NUMBER")) %>%
+  left_join(PFT_Multi, by = c("subject_id", "DATE_OF_PROCEDURE","SAMPLE_TYPE","SAMPLE_NUMBER"))
+  #select_if(~sum(!is.na(.)) > 0) # Select if the column is not completely full of NAs or doesn't sum to 0
+```
+
+```{r}
+samdf_CFCRS_4ABX <- samdf_CFCRS %>%
+  filter(subject_id == "4") %>%
+  select(SAMPLE_NAME, subject_id, MEDS_ABX_BIN_CIPROFLOXACIN, MEDS_ABX_CIPROFLOXACIN_ROUTE )
+```
+
+
+Calculate age based on procedure date and DOB
+```{r}
+samdf_CFCRS <- samdf_CFCRS %>% 
+  mutate(DATE_OF_PROCEDURE = as.Date(DATE_OF_PROCEDURE, format="%Y/%m/%d"),
+         DOB = as.Date(DOB, format="%Y-%m-%d")) %>%
+  mutate(DEM_AGE = age_calc(enddate = DATE_OF_PROCEDURE, dob = DOB, precise = TRUE, units = "years"))
+```
+
+3) Add control samples back to the sample dataframe
+```{r}
+samdf_CRS_controls <- bind_rows(samdf_CFCRS, labseq_CRS_controls)
+```
+
+# Save Data
+## Write csv
+```{r}
+write_csv(samdf_CRS_controls, "../SAMPLE_DATA/samdf_CF_CRS.csv")
+```
+## Save RData
+```{r}
+saveRDS(samdf_CRS_controls, "../SAMPLE_DATA/samdf_CF_CRS.rds")
+```
